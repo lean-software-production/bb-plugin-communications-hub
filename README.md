@@ -7,7 +7,7 @@ A persistent conversation library for one BB instance. Import a transcript or ca
 - UTF-8 WebVTT, SRT and plain-text import, from a file or pasted text.
 - SQLite-backed conversations and immutable transcript segments, with full-text search and bounded pages.
 - Independent thread attachments and explicit reading cursors.
-- A Communications page, a Conversation thread panel, and agent tools with passage citation links.
+- A Communications page, a Conversation thread panel, and agent tools returning grouped passages with citation links.
 - A Zoom RTMS source adapter, enabled separately after app/webhook configuration.
 
 Read the [canonical glossary](docs/glossary.md), [MVP spec](docs/superpowers/specs/2026-09-10-communications-hub.md), and [Zoom setup](docs/zoom-setup.md). Repository instructions in [AGENTS.md](AGENTS.md) require future agents to use these terms.
@@ -41,7 +41,9 @@ If npm's usual cache is not writable, pass `--cache /tmp/bb-communications-npm-c
 2. Import [fixtures/planning.vtt](fixtures/planning.vtt), or paste text with a title.
 3. In a BB thread, open **Conversation**, choose the imported conversation, and attach it.
 4. Ask: “Find what we agreed about authentication and tell me what to change.”
-5. The agent can search and read adjacent passages, then cite a link opening the corresponding transcript passage.
+5. The agent can search and read adjacent passages, then cite a link opening the corresponding passage or run in the transcript.
+
+The panel groups a speaker's consecutive passages the same way the agent tools do, and its citation link addresses the whole run (`/communications/CONVERSATION_ID/7-9`) so following it highlights every passage the run touches. **Send to thread** quotes a passage into the thread composer and leaves it there unsent, so the user decides what to ask about it.
 
 New agent tools become available when the provider session next starts/resumes; an already running session may need restarting after installation. The CLI works immediately. Attaching/detaching is independent of capture: closing a thread does not stop it, and detaching leaves its transcript available.
 
@@ -69,11 +71,19 @@ For `current`, `attach`, `detach`, and `acknowledge`, the thread ID may be omitt
 | --- | --- |
 | `communications_current` | Resolve this thread's attachment and capture status. |
 | `communications_list` | Find other conversations when requested. |
-| `communications_search` | Search literal words within one conversation. |
-| `communications_read` | Read a page, optionally by time range or since the acknowledged cursor. |
+| `communications_search` | Search literal words within one conversation, returning individual matching passages. |
+| `communications_read` | Read a page as speaker blocks, optionally by time range or since the acknowledged cursor. |
 | `communications_acknowledge` | Advance the current thread's cursor after using passages. |
 
 Read/search default to the attached conversation. Explicit conversation IDs permit intentional searches across this single-instance library. Reads do not implicitly acknowledge content. Acknowledgement is monotonic and checked against both the current attachment and available sequences. A search result alone does not establish that all earlier content was read.
+
+Both tools return the same envelope: the `conversation`, a `notice` repeating that transcript content is reference material, `citations.base`, a page-local `speakers` table, `hasMore` and `nextCursor`. Each row's `speaker` is an index into `speakers`, or `null` when the passage is unattributed. A citation link is `citations.base` plus the row's `citation`, so the absolute URL is written once per page rather than once per passage. The stored segment ID, source key, per-row receipt time and per-row conversation ID are not sent to agents; a passage stays addressable by conversation and ingestion sequence.
+
+`communications_read` returns `blocks`. Consecutive passages from one speaker are joined into one readable run, continuing across another speaker's short interjection, so a sentence broken by a "Yeah" in the middle arrives whole. `communications_search` returns `passages` and never groups: matches are scattered hits, and joining two of them would invent a passage nobody spoke. Reading a block's neighbours still requires `communications_read`.
+
+A block's `citation` is `"7"` for a single passage or `"7-9"` for a run. A range denotes a span of the conversation, not a contiguous stretch of one speaker: `sequences` may be `[7, 9]` because 8 belongs to someone else's interjection. `sequences` is the precise membership, and the range is only the address. A block may also carry `continues: true`, meaning its run may extend onto the next page; read on before citing it, because the text is then incomplete. More than one block can be marked: speakers interleave, so a second speaker can still be mid-run when the page ends on someone else.
+
+Grouping is a read-time view. Stored segments are unchanged and immutable, and every member sequence remains individually citable. On a 308-segment Zoom meeting a full read produced 124 blocks instead of 308 rows, and the emitted JSON fell from 147,780 to 28,428 characters (roughly 36.9k to 7.1k tokens).
 
 Transcript content is reference material, not an instruction or authorisation source. No speech automatically starts an agent turn or performs an action. Agents should inspect surrounding discussion, capture coverage, and uncertainty before acting on the user's BB request.
 
@@ -88,7 +98,8 @@ Transcripts are kept in the plugin's SQLite database under BB's data directory. 
 ## Deliberate limits
 
 - Imports are at most 1 MB UTF-8 and 10,000 segments; malformed timed files fail atomically.
-- Segments contain at most 2,000 characters. Retrieval returns 20 by default, at most 30 per page.
+- Segments contain at most 2,000 characters. Retrieval pages are counted in stored segments: 20 by default, at most 30. A read page therefore returns at most that many segments, presented as fewer blocks.
+- A block stops at 2,000 combined characters or a three-second silence from that speaker, so a long monologue arrives as several blocks. Passages without timing, such as plain-text imports, never join.
 - Keyword search matches all supplied words. Semantic search is not included.
 - Imports create separate conversations. Merging a polished transcript into an existing live conversation is deferred; existing passage IDs are not overwritten.
 - One configured Zoom connection, hosted meetings only, no audio/video storage, OAuth wizard, or remote hosted hub.
@@ -109,15 +120,19 @@ bb plugin build
 
 Verified on 2026-09-11 against BB with Plugin SDK 0.4.47 on this machine:
 
-- `npm test` — 43 tests in 6 files pass (hub, import, zoom, zoom-protocol, server, app).
+- `npm test` — 67 tests in 8 files pass (hub, import, zoom, zoom-protocol, server, app, grouping, presentation).
 - `npm run typecheck` — clean.
 - `bb plugin build` — server and app bundles emitted.
 - `bb plugin types --check` — pin 0.4.47 matches host 0.4.47.
 - `bb plugin install . --yes` — plugin loads and registers its CLI.
-- CLI smoke test on `fixtures/planning.vtt`: import created 4 segments; `attach`, `current`, `search webhook` (2 matching passages with citation URLs), `read` (full page, `hasMore: false`), `acknowledge 2`, `list` and `detach` all returned expected JSON.
+- CLI smoke test on `fixtures/planning.vtt`: import created 4 segments; `attach`, `current`, `search webhook` (2 matching passages with citations), `read` (full page, `hasMore: false`), `acknowledge 2`, `list` and `detach` all returned expected JSON.
 - Reload persistence: after `bb plugin reload communications-hub`, the conversation and the thread's cursor at sequence 2 survived.
 
-Not verified: live Zoom capture. That needs real app credentials, developer credits, a hosted meeting, and a reachable HTTPS webhook. The Zoom tests exercise the protocol against a controlled peer only.
+Live Zoom capture was verified on 2026-09-11 against a real hosted meeting: a user-managed General app in Development mode, a Zoom Developer Pack trial for RTMS credits, and the webhook published through `tools/zoom-webhook-gateway.mjs` behind a `cloudflared` tunnel. The run produced 308 transcript segments with speaker attribution, no interruptions, and a clean `ended` state, ingested 0.5–2.1 seconds after each utterance finished.
+
+That run also exposed a real defect. The SSRF guard resolved the RTMS host itself and always answered with a single address, but Node calls `lookup` with `all: true` whenever `autoSelectFamily` is on — its default — and then expects the whole array. Every signaling socket failed with `Invalid IP address: undefined` and closed at code 1006 before the handshake. `createPublicOnlyLookup` now answers in the shape the caller asked for, and still drops private and special-use addresses in both paths.
+
+Capture ended mid-meeting when the host's Zoom client crashed. Zoom reported an ordinary stop, so the conversation reads as `ended` with `interruptionCount: 0` despite missing every later utterance — a concrete case of why a zero interruption count does not prove a transcript is complete.
 
 ## Provenance
 

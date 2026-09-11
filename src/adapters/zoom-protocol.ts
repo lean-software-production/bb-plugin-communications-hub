@@ -1,6 +1,7 @@
 import { createHash, createHmac } from "node:crypto";
 import { lookup } from "node:dns";
 import { isIP } from "node:net";
+import type { ClientRequestArgs } from "node:http";
 import WebSocket from "ws";
 import { z } from "zod";
 import type { CaptureState, SegmentInput } from "../domain.js";
@@ -68,6 +69,12 @@ export interface ZoomRtmsSessionOptions {
   onSegments(segments: SegmentInput[]): unknown;
   onState(state: CaptureState, detail?: string | null): unknown;
   onTerminal?(): unknown;
+  /**
+   * Optional wire diagnostics sink for capture bring-up. Receives connection
+   * close codes, socket errors and rejected handshake status codes only;
+   * transcript content is never passed here.
+   */
+  log?(message: string): unknown;
 }
 
 function isPrivateOrSpecialIp(address: string): boolean {
@@ -125,27 +132,66 @@ export function assertSafeZoomWssUrl(value: string): URL {
   return url;
 }
 
+export interface ResolvedAddress {
+  address: string;
+  family: number;
+}
+
+type LookupImplementation = (
+  hostname: string,
+  options: { all: true } & Record<string, unknown>,
+  callback: (error: NodeJS.ErrnoException | null, addresses: ResolvedAddress[]) => void,
+) => void;
+
+/**
+ * DNS lookup that drops private and special-use addresses, so a signed webhook
+ * cannot steer the RTMS socket at an internal host.
+ *
+ * net calls lookup with all: true whenever autoSelectFamily is on, which is the
+ * Node default, and then expects the full array back. Answering such a call
+ * with a single address makes net read .address off a string and fail with
+ * "Invalid IP address: undefined", so the caller's all flag decides the shape
+ * of the answer.
+ */
+export function createPublicOnlyLookup(implementation: LookupImplementation) {
+  return function publicOnly(
+    hostname: string,
+    options: { all?: boolean } & Record<string, unknown>,
+    callback: (
+      error: NodeJS.ErrnoException | null,
+      addressOrAddresses: string | ResolvedAddress[],
+      family?: number,
+    ) => void,
+  ): void {
+    implementation(hostname, { ...options, all: true }, (error, addresses) => {
+      if (error) {
+        callback(error, "", 0);
+        return;
+      }
+      const publicAddresses = addresses.filter((entry) => !isPrivateOrSpecialIp(entry.address));
+      const selected = publicAddresses[0];
+      if (!selected) {
+        callback(new Error("Zoom RTMS destination resolved to a non-public address"), "", 0);
+        return;
+      }
+      if (options.all === true) {
+        callback(null, publicAddresses);
+        return;
+      }
+      callback(null, selected.address, selected.family);
+    });
+  };
+}
+
+const publicOnlyLookup = createPublicOnlyLookup(lookup as unknown as LookupImplementation);
+
 /** Production transport validates the DNS answer used by the actual socket. */
 export const zoomWebSocketFactory: RtmsSocketFactory = (value, handlers) => {
   const url = assertSafeZoomWssUrl(value);
   const socket = new WebSocket(url, {
     maxPayload: MAX_MESSAGE_BYTES,
     perMessageDeflate: false,
-    lookup(hostname, options, callback) {
-      lookup(hostname, { ...options, all: true }, (error, addresses) => {
-        if (error) {
-          callback(error, "", 0);
-          return;
-        }
-        const publicAddresses = addresses.filter((entry) => !isPrivateOrSpecialIp(entry.address));
-        const selected = publicAddresses[0];
-        if (!selected) {
-          callback(new Error("Zoom RTMS destination resolved to a non-public address"), "", 0);
-          return;
-        }
-        callback(null, selected.address, selected.family);
-      });
-    },
+    lookup: publicOnlyLookup as unknown as ClientRequestArgs["lookup"],
   });
   socket.on("open", handlers.open);
   socket.on("message", (data) => {
@@ -268,14 +314,17 @@ export class ZoomRtmsSession {
         message: (data) => {
           if (this.signaling === socket) this.handleSignaling(data);
         },
-        close: () => {
+        close: (code, reason) => {
           if (this.signaling !== socket) return;
+          this.wireDebug("signaling closed", { code, reason, attempts: this.signalingAttempts });
           this.signaling = undefined;
           this.closeMedia();
           this.retrySignaling("Zoom signaling connection closed");
         },
-        error: () => {
-          if (this.signaling === socket) this.emitState("interrupted", "Zoom signaling connection failed");
+        error: (error) => {
+          if (this.signaling !== socket) return;
+          this.wireDebug("signaling error", { message: error.message });
+          this.emitState("interrupted", "Zoom signaling connection failed");
         },
       });
       this.signaling = socket;
@@ -307,13 +356,16 @@ export class ZoomRtmsSession {
         message: (data) => {
           if (this.media === socket) this.handleMedia(data);
         },
-        close: () => {
+        close: (code, reason) => {
           if (this.media !== socket) return;
+          this.wireDebug("transcript closed", { code, reason, attempts: this.mediaAttempts });
           this.media = undefined;
           this.retryMedia("Zoom transcript connection closed");
         },
-        error: () => {
-          if (this.media === socket) this.emitState("interrupted", "Zoom transcript connection failed");
+        error: (error) => {
+          if (this.media !== socket) return;
+          this.wireDebug("transcript error", { message: error.message });
+          this.emitState("interrupted", "Zoom transcript connection failed");
         },
       });
       this.media = socket;
@@ -333,6 +385,10 @@ export class ZoomRtmsSession {
     const handshake = handshakeResponseSchema.safeParse(value);
     if (handshake.success) {
       if (handshake.data.status_code !== 0 || !handshake.data.media_server) {
+        this.wireDebug("signaling handshake rejected", {
+          statusCode: handshake.data.status_code,
+          hasMediaServer: Boolean(handshake.data.media_server),
+        });
         this.end("interrupted", "Zoom rejected the signaling handshake");
         return;
       }
@@ -365,6 +421,7 @@ export class ZoomRtmsSession {
     const handshake = dataHandshakeResponseSchema.safeParse(value);
     if (handshake.success) {
       if (handshake.data.status_code !== 0) {
+        this.wireDebug("transcript handshake rejected", { statusCode: handshake.data.status_code });
         this.end("interrupted", "Zoom rejected the transcript handshake");
         return;
       }
@@ -441,6 +498,10 @@ export class ZoomRtmsSession {
     if (state === 3) this.emitState("paused", "Zoom RTMS session paused");
     else if (state === 2 || state === 4) this.emitState("capturing", "Receiving Zoom transcript");
     else if (state === 5) this.end("ended", "Zoom RTMS session ended");
+  }
+
+  private wireDebug(event: string, detail: Record<string, unknown>): void {
+    this.options.log?.(`zoom ${event} ${JSON.stringify(detail)}`);
   }
 
   private handshakeSignature(): string {

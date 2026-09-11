@@ -48,6 +48,23 @@ const segments: TranscriptSegment[] = [
   },
 ];
 
+/** Ada finishes her sentence after Ben's interjection, as speakers really do. */
+const interleavedSegments: TranscriptSegment[] = [
+  segments[0]!,
+  segments[1]!,
+  {
+    id: "segment-9",
+    conversationId: conversation.id,
+    sequence: 9,
+    sourceKey: "cue-9",
+    speaker: "Ada",
+    text: "And the reader ships Friday.",
+    startMs: 17_500,
+    endMs: 22_000,
+    receivedAt: Date.UTC(2026, 8, 10, 9, 5),
+  },
+];
+
 function handlers(
   overrides: Partial<PluginRpcTestHandlers<typeof rpcContract>> = {},
 ): PluginRpcTestHandlers<typeof rpcContract> {
@@ -288,5 +305,73 @@ describe("Communications Hub app", () => {
       method: "openThreadPanel",
       options: { actionId: "conversation" },
     });
+  });
+
+  it("groups a speaker's passages across an interjection and sends one to the composer", async () => {
+    const app = await loadPluginApp(() => import("../app"));
+    const slot = renderSlot(
+      app.threadPanelActions[0]!,
+      { threadId: "thread-a", params: null },
+      {
+        rpc: handlers({
+          "attachments.get": () => ({
+            attachment: { threadId: "thread-a", conversationId: conversation.id, cursor: 0 },
+            conversation,
+          }),
+          "transcripts.read": () => ({
+            conversation,
+            segments: interleavedSegments,
+            hasMore: false,
+            nextCursor: 9,
+          }),
+        }),
+      },
+    );
+
+    // Ada's two passages read as one, and Ben's interjection stays separate.
+    await slot.findByText("Ship the transcript reader. And the reader ships Friday.");
+    slot.getByText("Add stable citations too.");
+    slot.getByText("#7–9");
+
+    fireEvent.click(
+      slot.getByRole("button", { name: "Send passage #7–9 to the thread composer" }),
+    );
+    await waitFor(() => expect(slot.inspection.composer.text).toContain("passages 7–9 — Ada"));
+    expect(slot.inspection.composer.text).toContain(
+      "> Ship the transcript reader. And the reader ships Friday.",
+    );
+    // Quoting is not sending: nothing was dispatched to the provider.
+    expect(slot.inspection.composer.submits).toHaveLength(0);
+  });
+
+  it("cites a grouped passage as a range and opens every block the range touches", async () => {
+    const app = await loadPluginApp(() => import("../app"));
+    const rpc = handlers({
+      "transcripts.read": () => ({
+        conversation,
+        segments: interleavedSegments,
+        hasMore: false,
+        nextCursor: 9,
+      }),
+    });
+    const listing = renderSlot(app.navPanels[0]!, { subPath: "conversation-1" }, { rpc });
+    await listing.findByText("Ship the transcript reader. And the reader ships Friday.");
+    fireEvent.click(listing.getByRole("button", { name: "Open citation 7–9" }));
+    expect(listing.inspection.navigateCalls).toContainEqual({
+      method: "toPluginPanel",
+      path: "communications",
+      options: { subPath: "conversation-1/7-9" },
+    });
+
+    const cited = renderSlot(app.navPanels[0]!, { subPath: "conversation-1/7-9" }, { rpc });
+    await cited.findByText("Ship the transcript reader. And the reader ships Friday.");
+    // Ben's passage 8 falls inside the cited range, so it is marked too.
+    expect(cited.getAllByText("Referenced passage")).toHaveLength(2);
+  });
+
+  it("rejects a malformed citation range", async () => {
+    const app = await loadPluginApp(() => import("../app"));
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "conversation-1/9-7" }, { rpc: handlers() });
+    await slot.findByText("This conversation link is invalid.");
   });
 });

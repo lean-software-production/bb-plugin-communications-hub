@@ -3,6 +3,7 @@ import type { SegmentInput } from "../src/domain.js";
 import {
   ZoomRtmsSession,
   assertSafeZoomWssUrl,
+  createPublicOnlyLookup,
   type RtmsSocket,
   type RtmsSocketFactory,
 } from "../src/adapters/zoom-protocol.js";
@@ -235,5 +236,47 @@ describe("Zoom RTMS destination validation", () => {
     expect(assertSafeZoomWssUrl("wss://rtms.zoom.us/transcript").href).toBe(
       "wss://rtms.zoom.us/transcript",
     );
+  });
+});
+
+describe("Zoom RTMS DNS guard", () => {
+  const answers = [
+    { address: "10.0.0.5", family: 4 },
+    { address: "203.0.113.7", family: 4 },
+    { address: "198.51.100.9", family: 4 },
+  ];
+  const resolver = (
+    _hostname: string,
+    _options: { all: true } & Record<string, unknown>,
+    callback: (error: NodeJS.ErrnoException | null, addresses: typeof answers) => void,
+  ) => callback(null, answers);
+
+  it("answers an all: true lookup with every public address", () => {
+    // net asks for all addresses whenever autoSelectFamily is on, and reads
+    // .address off each entry; a single string here fails the connection with
+    // "Invalid IP address: undefined".
+    const lookup = createPublicOnlyLookup(resolver);
+    const received = vi.fn();
+    lookup("rtms.zoom.us", { all: true, family: 0 }, received);
+    expect(received).toHaveBeenCalledWith(null, [
+      { address: "203.0.113.7", family: 4 },
+      { address: "198.51.100.9", family: 4 },
+    ]);
+  });
+
+  it("answers a single-address lookup with the first public address", () => {
+    const lookup = createPublicOnlyLookup(resolver);
+    const received = vi.fn();
+    lookup("rtms.zoom.us", { family: 0 }, received);
+    expect(received).toHaveBeenCalledWith(null, "203.0.113.7", 4);
+  });
+
+  it("fails when every answer is private", () => {
+    const lookup = createPublicOnlyLookup((_hostname, _options, callback) =>
+      callback(null, [{ address: "127.0.0.1", family: 4 }]),
+    );
+    const received = vi.fn();
+    lookup("rtms.zoom.us", { all: true }, received);
+    expect(received.mock.calls[0]![0]).toBeInstanceOf(Error);
   });
 });

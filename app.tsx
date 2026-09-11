@@ -3,11 +3,12 @@ import {
   type ChangeEvent, type FormEvent, type ReactNode,
 } from "react";
 import {
-  definePluginApp, useBbNavigate, useRealtime, useRealtimeConnectionState, useRpc,
+  definePluginApp, useBbNavigate, useComposer, useRealtime, useRealtimeConnectionState, useRpc,
   type PluginNavPanelProps, type PluginThreadHeaderActionProps, type PluginThreadPanelProps,
 } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./src/contracts";
 import type { Conversation, ThreadAttachment, TranscriptSegment } from "./src/domain";
+import { groupSegments, type SpeakerBlock } from "./src/grouping";
 import type { ImportFormat } from "./src/adapters/import";
 import { Button } from "./components/ui/button";
 import { Icon } from "./components/ui/icon";
@@ -76,12 +77,16 @@ type Page = {
 };
 
 function TranscriptView({
-  conversationId, initialSequence, compact = false, onPage,
+  conversationId, initialSequence, initialEndSequence, compact = false, onPage, onSend,
 }: {
   conversationId: string;
   initialSequence?: number;
+  /** Last passage of a cited range; a single-passage citation omits it. */
+  initialEndSequence?: number;
   compact?: boolean;
   onPage?: (page: Page) => void;
+  /** Offered per passage when the surface has a composer to write into. */
+  onSend?: (block: SpeakerBlock) => void;
 }) {
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
@@ -155,6 +160,10 @@ function TranscriptView({
     }
   };
 
+  // Presentation only: segments stay immutable and each member sequence still
+  // cites on its own.
+  const blocks = page === null ? [] : groupSegments(page.segments);
+
   if (page === null && error === null) return <StatusBox>Loading transcript…</StatusBox>;
   return (
     <section aria-label="Transcript" className="space-y-3">
@@ -189,22 +198,41 @@ function TranscriptView({
       {page !== null && page.segments.length === 0 ? <StatusBox>{activeQuery ? "No matching passages." : "No transcript passages yet."}</StatusBox> : null}
       {page !== null && page.segments.length > 0 ? (
         <ol className="divide-y divide-border rounded-lg border border-border bg-card">
-          {page.segments.map((segment) => {
-            const referenced = segment.sequence === initialSequence;
+          {blocks.map((block) => {
+            // A cited range highlights every block it touches, so a quote that
+            // spans passages lands on all of them rather than just the first.
+            const referenced = initialSequence !== undefined && block.sequences.some(
+              (sequence) => sequence >= initialSequence && sequence <= (initialEndSequence ?? initialSequence),
+            );
+            const citation = block.firstSequence === block.lastSequence
+              ? `${block.firstSequence}`
+              : `${block.firstSequence}-${block.lastSequence}`;
+            const label = block.sequences.length === 1
+              ? `#${block.firstSequence}`
+              : `#${block.firstSequence}–${block.lastSequence}`;
             return (
-              <li key={segment.id} className={cn("px-3 py-3", referenced && "bg-accent")} aria-current={referenced ? "location" : undefined}>
+              <li key={block.firstSequence} className={cn("px-3 py-3", referenced && "bg-accent")} aria-current={referenced ? "location" : undefined}>
                 <div className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
-                  <span className="font-mono">#{segment.sequence}</span>
-                  {segment.speaker ? <span className="font-medium text-foreground">{segment.speaker}</span> : null}
-                  {relativeTime(segment.startMs) ? <span title="Source-relative timing">{relativeTime(segment.startMs)}</span> : null}
+                  <span className="font-mono" title={block.sequences.length === 1 ? undefined : `Passages ${block.sequences.join(", ")}`}>{label}</span>
+                  {block.speaker ? <span className="font-medium text-foreground">{block.speaker}</span> : null}
+                  {relativeTime(block.startMs) ? <span title="Source-relative timing">{relativeTime(block.startMs)}</span> : null}
                   {referenced ? <span className="rounded bg-primary/10 px-1.5 py-0.5 text-primary">Referenced passage</span> : null}
-                  <button
-                    type="button" className="ml-auto underline hover:text-foreground"
-                    aria-label={`Open citation ${segment.sequence}`}
-                    onClick={() => navigate.toPluginPanel("communications", { subPath: `${conversationId}/${segment.sequence}` })}
-                  >Citation</button>
+                  <span className="ml-auto flex items-center gap-2">
+                    {onSend ? (
+                      <button
+                        type="button" className="underline hover:text-foreground"
+                        aria-label={`Send passage ${label} to the thread composer`}
+                        onClick={() => onSend(block)}
+                      >Send to thread</button>
+                    ) : null}
+                    <button
+                      type="button" className="underline hover:text-foreground"
+                      aria-label={`Open citation ${label.replace("#", "")}`}
+                      onClick={() => navigate.toPluginPanel("communications", { subPath: `${conversationId}/${citation}` })}
+                    >Citation</button>
+                  </span>
                 </div>
-                <p className="whitespace-pre-wrap text-sm leading-6">{segment.text}</p>
+                <p className="whitespace-pre-wrap text-sm leading-6">{block.text}</p>
               </li>
             );
           })}
@@ -215,7 +243,10 @@ function TranscriptView({
   );
 }
 
-function parseTarget(subPath: string): { conversationId: string; sequence?: number } | null {
+/** A citation addresses one passage (`7`) or a speaker's run of them (`7-9`). */
+export function parseTarget(
+  subPath: string,
+): { conversationId: string; sequence?: number; endSequence?: number } | null {
   const [rawId, rawSequence, ...rest] = subPath.split("/");
   if (!rawId || rest.length > 0) return null;
   let conversationId: string;
@@ -225,8 +256,14 @@ function parseTarget(subPath: string): { conversationId: string; sequence?: numb
     return null;
   }
   if (!rawSequence) return { conversationId };
-  const sequence = Number(rawSequence);
-  return Number.isSafeInteger(sequence) && sequence > 0 ? { conversationId, sequence } : null;
+  const [rawStart, rawEnd, ...extra] = rawSequence.split("-");
+  if (extra.length > 0 || !rawStart) return null;
+  const sequence = Number(rawStart);
+  if (!Number.isSafeInteger(sequence) || sequence <= 0) return null;
+  if (rawEnd === undefined) return { conversationId, sequence };
+  const endSequence = Number(rawEnd);
+  if (!Number.isSafeInteger(endSequence) || endSequence < sequence) return null;
+  return { conversationId, sequence, endSequence };
 }
 
 function ImportForm({ onImported }: { onImported: (value: Conversation) => void }) {
@@ -397,7 +434,10 @@ function CommunicationsPage({ subPath }: PluginNavPanelProps) {
       </div>
       {canStop ? <p className="text-xs text-muted-foreground">This closes this hub’s connection. Zoom host controls govern the upstream session.</p> : null}
       <ErrorMessage error={error} />
-      <TranscriptView conversationId={target.conversationId} initialSequence={target.sequence} onPage={(page) => setCurrent(page.conversation)} />
+      <TranscriptView
+        conversationId={target.conversationId} initialSequence={target.sequence} initialEndSequence={target.endSequence}
+        onPage={(page) => setCurrent(page.conversation)}
+      />
     </div></div>;
   }
   return <div className="h-full min-h-0 overflow-y-auto"><div className="mx-auto w-full max-w-3xl space-y-5 px-4 pb-6 pt-4 md:px-5">
@@ -411,8 +451,24 @@ function CommunicationsPage({ subPath }: PluginNavPanelProps) {
   </div></div>;
 }
 
+/**
+ * Quote a passage for the composer. The speaker name comes from the meeting
+ * platform and is not identity: it is what the transcript claims, so the quote
+ * says so rather than presenting it as an instruction from that person.
+ */
+function quoteBlock(block: SpeakerBlock, conversationTitle: string): string {
+  const label = block.sequences.length === 1
+    ? `passage ${block.firstSequence}`
+    : `passages ${block.firstSequence}–${block.lastSequence}`;
+  const who = block.speaker ?? "Unattributed speaker";
+  const when = relativeTime(block.startMs);
+  const heading = `From ${conversationTitle}, ${label} — ${who}${when ? ` at ${when}` : ""}:`;
+  return `${heading}\n> ${block.text.replace(/\n/g, "\n> ")}`;
+}
+
 function ThreadConversationPanel({ threadId }: PluginThreadPanelProps) {
   const rpc = useRpc<typeof rpcContract>();
+  const composer = useComposer();
   const [attachment, setAttachment] = useState<ThreadAttachment | null>(null);
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -466,7 +522,14 @@ function ThreadConversationPanel({ threadId }: PluginThreadPanelProps) {
     <ErrorMessage error={error} />
     {!attachment || !conversation ? <StatusBox>Attach this thread to a conversation to read its transcript.</StatusBox> : <>
       <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">Reading cursor: passage {attachment.cursor}. Reading and search do not acknowledge passages automatically.</div>
-      <TranscriptView conversationId={conversation.id} compact onPage={(page) => { setConversation(page.conversation); setVisibleCursor(page.nextCursor); }} />
+      <TranscriptView
+        conversationId={conversation.id} compact
+        onPage={(page) => { setConversation(page.conversation); setVisibleCursor(page.nextCursor); }}
+        onSend={(block) => {
+          const quote = quoteBlock(block, conversation.title);
+          composer.updateText((current) => current.trim().length === 0 ? quote : `${current.trimEnd()}\n\n${quote}`);
+        }}
+      />
       {visibleCursor > attachment.cursor ? <Button
         type="button" size="sm" variant="outline" aria-label={`Acknowledge through passage ${visibleCursor}`}
         onClick={async () => {
