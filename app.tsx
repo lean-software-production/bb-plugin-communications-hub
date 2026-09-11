@@ -95,8 +95,24 @@ function TranscriptView({
   const [activeQuery, setActiveQuery] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [draftTitle, setDraftTitle] = useState<string | null>(null);
   const onPageRef = useRef(onPage);
   onPageRef.current = onPage;
+
+  // Zoom's RTMS events carry no meeting topic, so a capture can only name itself after its
+  // meeting id and start. Renaming is what makes a conversation findable months later.
+  const rename = useCallback(async (title: string) => {
+    const next = title.trim();
+    setDraftTitle(null);
+    if (!next) return;
+    try {
+      const conversation = await rpc.call("conversations.rename", { conversationId, title: next });
+      setPage((current) => current === null ? current : { ...current, conversation });
+      setError(null);
+    } catch (cause) {
+      setError(errorText(cause));
+    }
+  }, [conversationId, rpc]);
 
   const accept = useCallback((next: Page, append: boolean) => {
     setPage((current) => append && current !== null
@@ -170,7 +186,33 @@ function TranscriptView({
       {page === null ? null : (
         <div>
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className={cn("font-semibold", compact ? "text-base" : "text-lg")}>{page.conversation.title}</h2>
+            {draftTitle === null ? (
+              <>
+                <h2 className={cn("font-semibold", compact ? "text-base" : "text-lg")}>{page.conversation.title}</h2>
+                <button
+                  type="button"
+                  aria-label="Rename conversation"
+                  className="text-xs underline text-muted-foreground hover:text-foreground"
+                  onClick={() => setDraftTitle(page.conversation.title)}
+                >Rename</button>
+              </>
+            ) : (
+              <form
+                className="flex flex-1 gap-2"
+                onSubmit={(event) => { event.preventDefault(); void rename(draftTitle); }}
+              >
+                <Input
+                  autoFocus
+                  aria-label="Conversation title"
+                  value={draftTitle}
+                  maxLength={200}
+                  onChange={(event) => setDraftTitle(event.target.value)}
+                  onKeyDown={(event) => { if (event.key === "Escape") setDraftTitle(null); }}
+                />
+                <Button type="submit" size="sm" disabled={!draftTitle.trim()}>Save</Button>
+                <Button type="button" size="sm" variant="outline" onClick={() => setDraftTitle(null)}>Cancel</Button>
+              </form>
+            )}
             <span className="rounded-full bg-secondary px-2 py-0.5 text-xs">{captureLabel(page.conversation.captureState)}</span>
           </div>
           <p className="mt-1 text-xs text-muted-foreground">

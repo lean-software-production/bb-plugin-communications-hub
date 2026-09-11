@@ -51,7 +51,11 @@ export function groupSegments(
   const openBySpeaker = new Map<string, SpeakerBlock>();
 
   for (const segment of [...segments].sort((left, right) => left.sequence - right.sequence)) {
-    const key = segment.speaker ?? "";
+    // Prefer the source's participant id: two guests can pick the same display name, and
+    // merging their turns would attribute one person's words to another.
+    const key = segment.speakerId !== null && segment.speakerId !== undefined
+      ? `id:${segment.speakerId}`
+      : `name:${segment.speaker ?? ""}`;
     const open = openBySpeaker.get(key);
     const timed = segment.startMs !== null && open?.endMs !== null && open?.endMs !== undefined;
     const withinGap = timed && segment.startMs! - open!.endMs! <= gapMs;

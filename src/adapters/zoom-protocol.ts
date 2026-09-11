@@ -434,6 +434,12 @@ export class ZoomRtmsSession {
     if (!transcript.success) return;
     const content = transcript.data.content;
     const speaker = content.user_name ? truncateUtf16(content.user_name, 200) : null;
+    // Zoom display names are self-chosen free text: two participants can share one, and a
+    // participant can change theirs mid-meeting. user_id is Zoom's own participant identity
+    // for this occurrence, so it is what actually distinguishes speakers.
+    const speakerId = content.user_id === undefined || content.user_id === null
+      ? null
+      : truncateUtf16(String(content.user_id), 200);
     const fingerprint = createHash("sha256").update(JSON.stringify({
       meetingUuid: this.options.meetingUuid,
       userId: content.user_id ?? null,
@@ -446,6 +452,7 @@ export class ZoomRtmsSession {
     const segments = splitBoundedText(content.data).map((text, index): SegmentInput => ({
       sourceKey: `zoom:${fingerprint}:${index}`,
       speaker,
+      speakerId,
       text,
       startMs: Math.max(0, content.start_time - this.options.anchorMs),
       endMs: Math.max(0, content.end_time - this.options.anchorMs),

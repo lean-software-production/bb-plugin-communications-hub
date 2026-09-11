@@ -59,6 +59,7 @@ bb communications current THREAD_ID
 bb communications search CONVERSATION_ID authentication
 bb communications read CONVERSATION_ID 0 20
 bb communications acknowledge CONVERSATION_ID 2 THREAD_ID
+bb communications rename CONVERSATION_ID 'Attribution design'
 bb communications detach THREAD_ID
 bb communications status
 ```

@@ -56,3 +56,101 @@ describe('persistent conversation library', () => {
     hub.setCapture(m.id,'capturing'); expect(hub.getConversation(m.id).interruptionCount).toBe(1); expect(hub.getConversation(imported.id).captureState).toBe('idle');
   });
 });
+
+describe('capture window accounting', () => {
+  it('bounds the stream window with captureEndedAt instead of the last passage', () => {
+    // lastReceivedAt misses trailing silence: on two real meetings it undercounted the
+    // billed stream by 35-37%, which makes it useless for cost accounting.
+    const {hub}=setup(); const m=hub.ensureConversation('zoom','occurrence','Live');
+    hub.setCapture(m.id,'capturing');
+    expect(hub.getConversation(m.id).captureEndedAt).toBeNull();
+    hub.setCapture(m.id,'ended','Zoom meeting ended');
+    const ended=hub.getConversation(m.id);
+    expect(ended.captureEndedAt).not.toBeNull();
+    expect(ended.captureEndedAt!).toBeGreaterThanOrEqual(ended.captureStartedAt!);
+  });
+  it('keeps the first moment capture stopped, so dead time is not billed as streaming', () => {
+    const {hub}=setup(); const m=hub.ensureConversation('zoom','occurrence','Live');
+    hub.setCapture(m.id,'capturing');
+    hub.setCapture(m.id,'interrupted','Signaling closed');
+    const first=hub.getConversation(m.id).captureEndedAt;
+    hub.setCapture(m.id,'ended','Zoom meeting ended');
+    expect(hub.getConversation(m.id).captureEndedAt).toBe(first);
+  });
+  it('clears the end time when a capture resumes', () => {
+    const {hub}=setup(); const m=hub.ensureConversation('zoom','occurrence','Live');
+    hub.setCapture(m.id,'capturing'); hub.setCapture(m.id,'interrupted','Signaling closed');
+    expect(hub.getConversation(m.id).captureEndedAt).not.toBeNull();
+    hub.setCapture(m.id,'capturing');
+    expect(hub.getConversation(m.id).captureEndedAt).toBeNull();
+  });
+  it('stores the source participant id alongside the self-chosen display name', () => {
+    const {hub}=setup(); const m=hub.ensureConversation('zoom','occurrence','Live');
+    hub.appendSegments(m.id,[{...segment('a'),speakerId:'16778240'}]);
+    expect(hub.readTranscript(m.id,{}).segments[0]!.speakerId).toBe('16778240');
+  });
+  it('leaves speakerId null for sources that do not supply one', () => {
+    const {hub}=setup(); const m=hub.ensureConversation('import','one','Planning');
+    hub.appendSegments(m.id,[segment('a')]);
+    expect(hub.readTranscript(m.id,{}).segments[0]!.speakerId).toBeNull();
+  });
+});
+
+describe('schema upgrades', () => {
+  it('adds new columns to a database created before they existed, keeping stored passages', () => {
+    // SQLite has no ADD COLUMN IF NOT EXISTS and CREATE TABLE IF NOT EXISTS is a no-op on
+    // an existing database, so this is the path a real installation takes on upgrade.
+    const db = new Database(':memory:'); databases.push(db);
+    db.exec(`CREATE TABLE conversations (
+      id TEXT PRIMARY KEY, sourceId TEXT NOT NULL, externalId TEXT NOT NULL, title TEXT NOT NULL,
+      createdAt INTEGER NOT NULL, captureStartedAt INTEGER, lastReceivedAt INTEGER,
+      captureState TEXT NOT NULL DEFAULT 'idle', captureDetail TEXT, interruptionCount INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(sourceId, externalId))`);
+    db.exec(`CREATE TABLE segments (
+      id TEXT NOT NULL UNIQUE, conversationId TEXT NOT NULL REFERENCES conversations(id),
+      sequence INTEGER NOT NULL, sourceKey TEXT NOT NULL, speaker TEXT, text TEXT NOT NULL,
+      startMs INTEGER, endMs INTEGER, receivedAt INTEGER NOT NULL,
+      UNIQUE(conversationId, sourceKey), UNIQUE(conversationId, sequence))`);
+    db.prepare('INSERT INTO conversations(id,sourceId,externalId,title,createdAt) VALUES(?,?,?,?,?)')
+      .run('old','zoom','occurrence','Earlier meeting',1);
+    db.prepare('INSERT INTO segments(id,conversationId,sequence,sourceKey,speaker,text,startMs,endMs,receivedAt) VALUES(?,?,?,?,?,?,?,?,?)')
+      .run('seg','old',1,'key','Alex','We agreed to add authentication.',1000,2000,5);
+
+    const hub = new Hub(db);
+
+    const conversation = hub.getConversation('old');
+    expect(conversation.captureEndedAt).toBeNull();
+    expect(conversation.title).toBe('Earlier meeting');
+    const [segment] = hub.readTranscript('old',{}).segments;
+    expect(segment!.text).toBe('We agreed to add authentication.');
+    expect(segment!.speakerId).toBeNull();
+    // Constructing again must not fail on the columns the first construction added.
+    expect(() => new Hub(db)).not.toThrow();
+  });
+});
+
+describe('renaming', () => {
+  it('renames a conversation without disturbing its passages or citations', () => {
+    const {hub}=setup(); const m=hub.ensureConversation('zoom','occurrence','Zoom meeting 881 · 2026-09-11 22:01Z');
+    hub.appendSegments(m.id,[segment('a'),segment('b')]);
+    const before=hub.readTranscript(m.id,{}).segments;
+
+    const renamed=hub.renameConversation(m.id,'  Attribution design  ');
+
+    expect(renamed.title).toBe('Attribution design');
+    expect(hub.getConversation(m.id).title).toBe('Attribution design');
+    expect(hub.readTranscript(m.id,{}).segments).toEqual(before);
+  });
+  it('rejects an empty title rather than leaving a conversation unnamed', () => {
+    const {hub}=setup(); const m=hub.ensureConversation('import','one','Planning');
+    expect(()=>hub.renameConversation(m.id,'   ')).toThrow();
+    expect(hub.getConversation(m.id).title).toBe('Planning');
+  });
+  it('keeps the chosen title when the source re-announces the same conversation', () => {
+    // ensureConversation runs on every reconnect; a source-derived title must not
+    // overwrite the one a human chose.
+    const {hub}=setup(); const m=hub.ensureConversation('zoom','occurrence','Zoom meeting 881');
+    hub.renameConversation(m.id,'Attribution design');
+    expect(hub.ensureConversation('zoom','occurrence','Zoom meeting 881').title).toBe('Attribution design');
+  });
+});

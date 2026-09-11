@@ -10,6 +10,7 @@ export const importInput=z.object({title:z.string().trim().min(1).max(200),forma
 export const rpcContract=defineRpcContract({
   'conversations.list':{input:z.object({offset:z.number().int().nonnegative().optional(),limit:z.number().int().min(1).max(100).optional()}).strict(),output:z.object({conversations:z.array(conversationSchema),hasMore:z.boolean(),nextOffset:z.number()})},
   'conversations.get':{input:z.object({conversationId:id}).strict(),output:conversationSchema},
+  'conversations.rename':{input:z.object({conversationId:id,title:z.string().trim().min(1).max(200)}).strict(),output:conversationSchema},
   'transcripts.import':{input:importInput,output:conversationSchema},
   'transcripts.read':{input:readInput,output:page},
   'transcripts.search':{input:readInput.extend({query:z.string().trim().min(1).max(200)}),output:page},

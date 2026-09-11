@@ -13,12 +13,12 @@ const idSchema = z.string().trim().min(1).max(256);
 export const migrations = [
   `CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY, sourceId TEXT NOT NULL, externalId TEXT NOT NULL, title TEXT NOT NULL,
-    createdAt INTEGER NOT NULL, captureStartedAt INTEGER, lastReceivedAt INTEGER,
+    createdAt INTEGER NOT NULL, captureStartedAt INTEGER, lastReceivedAt INTEGER, captureEndedAt INTEGER,
     captureState TEXT NOT NULL DEFAULT 'idle', captureDetail TEXT, interruptionCount INTEGER NOT NULL DEFAULT 0,
     UNIQUE(sourceId, externalId))`,
   `CREATE TABLE IF NOT EXISTS segments (
     id TEXT NOT NULL UNIQUE, conversationId TEXT NOT NULL REFERENCES conversations(id),
-    sequence INTEGER NOT NULL, sourceKey TEXT NOT NULL, speaker TEXT, text TEXT NOT NULL,
+    sequence INTEGER NOT NULL, sourceKey TEXT NOT NULL, speaker TEXT, speakerId TEXT, text TEXT NOT NULL,
     startMs INTEGER, endMs INTEGER, receivedAt INTEGER NOT NULL,
     UNIQUE(conversationId, sourceKey), UNIQUE(conversationId, sequence))`,
   `CREATE VIRTUAL TABLE IF NOT EXISTS segment_search USING fts5(text, content='segments', content_rowid='rowid')`,
@@ -32,12 +32,44 @@ export const migrations = [
 export class Hub {
   constructor(private db: Database.Database, private changed: () => void = () => {}, migrate?: (statements: string[]) => void) {
     if (migrate) migrate(migrations); else db.transaction(() => migrations.forEach(s=>db.exec(s)))();
+    this.ensureColumns();
+  }
+  /**
+   * Add columns introduced after a table was first created.
+   *
+   * `CREATE TABLE IF NOT EXISTS` is a no-op on an existing database, and SQLite
+   * has no `ADD COLUMN IF NOT EXISTS`, so an ALTER in `migrations` would throw
+   * on every run after the first. Checking the current shape is idempotent
+   * whether migrations ran once (BB) or on every construction (tests).
+   */
+  private ensureColumns() {
+    const additions: [string, string, string][] = [
+      ['conversations','captureEndedAt','INTEGER'],
+      ['segments','speakerId','TEXT'],
+    ];
+    for (const [table,column,type] of additions) {
+      const columns=this.db.prepare(`PRAGMA table_info(${table})`).all() as {name:string}[];
+      if (!columns.some(c=>c.name===column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    }
   }
   ensureConversation(sourceId: string, externalId: string, title: string): Conversation {
     idSchema.parse(sourceId); idSchema.parse(externalId); title=z.string().trim().min(1).max(200).parse(title);
     const existing=this.db.prepare('SELECT id FROM conversations WHERE sourceId=? AND externalId=?').get(sourceId,externalId) as {id:string}|undefined;
     if (existing) return this.getConversation(existing.id);
     const id=randomUUID(); this.db.prepare('INSERT INTO conversations(id,sourceId,externalId,title,createdAt) VALUES(?,?,?,?,?)').run(id,sourceId,externalId,title,Date.now());
+    this.changed(); return this.getConversation(id);
+  }
+  /**
+   * Rename a conversation.
+   *
+   * Source-derived titles name the room, not the discussion: Zoom's RTMS events carry no
+   * topic, so a capture is only ever "Zoom meeting <id>". A human-chosen title is what
+   * makes a conversation findable later. Passages are untouched, so citations still hold.
+   */
+  renameConversation(id: string, title: string): Conversation {
+    this.getConversation(id);
+    const next=z.string().trim().min(1).max(200).parse(title);
+    this.db.prepare('UPDATE conversations SET title=? WHERE id=?').run(next,id);
     this.changed(); return this.getConversation(id);
   }
   getConversation(id: string): Conversation {
@@ -57,9 +89,9 @@ export class Hub {
     const added=this.db.transaction(()=>{
       let sequence=(this.db.prepare('SELECT coalesce(max(sequence),0) AS n FROM segments WHERE conversationId=?').get(conversationId) as {n:number}).n;
       let count=0; const now=Date.now();
-      const insert=this.db.prepare('INSERT OR IGNORE INTO segments(id,conversationId,sequence,sourceKey,speaker,text,startMs,endMs,receivedAt) VALUES(?,?,?,?,?,?,?,?,?)');
+      const insert=this.db.prepare('INSERT OR IGNORE INTO segments(id,conversationId,sequence,sourceKey,speaker,speakerId,text,startMs,endMs,receivedAt) VALUES(?,?,?,?,?,?,?,?,?,?)');
       for (const s of segments) {
-        const result=insert.run(randomUUID(),conversationId,sequence+1,s.sourceKey,s.speaker,s.text,s.startMs,s.endMs,now);
+        const result=insert.run(randomUUID(),conversationId,sequence+1,s.sourceKey,s.speaker,s.speakerId ?? null,s.text,s.startMs,s.endMs,now);
         if (result.changes) { sequence++; count++; }
       }
       if (count) this.db.prepare('UPDATE conversations SET lastReceivedAt=? WHERE id=?').run(now,conversationId);
@@ -76,8 +108,13 @@ export class Hub {
   }
   setCapture(id: string, state: CaptureState, detail: string|null = null) {
     this.getConversation(id); captureStateSchema.parse(state); z.string().max(500).nullable().parse(detail);
+    // captureEndedAt keeps the FIRST moment capture stopped being active and clears on
+    // resumption, so a stream that dies and is never recovered is not credited with the
+    // dead time. lastReceivedAt cannot substitute: it misses trailing silence, which
+    // measured 35-37% of two real meetings.
     this.db.prepare(`UPDATE conversations SET interruptionCount=interruptionCount+CASE WHEN ? IN ('interrupted','paused','stopped') AND captureState IN ('connecting','capturing') THEN 1 ELSE 0 END, captureState=?,captureDetail=?,captureStartedAt=CASE
-      WHEN ? IN ('connecting','capturing') THEN coalesce(captureStartedAt,?) ELSE captureStartedAt END WHERE id=?`).run(state,state,detail,state,Date.now(),id);
+      WHEN ? IN ('connecting','capturing') THEN coalesce(captureStartedAt,?) ELSE captureStartedAt END,
+      captureEndedAt=CASE WHEN ? IN ('connecting','capturing') THEN NULL ELSE coalesce(captureEndedAt,?) END WHERE id=?`).run(state,state,detail,state,Date.now(),state,Date.now(),id);
     this.changed(); return this.getConversation(id);
   }
   interruptActiveCaptures() {

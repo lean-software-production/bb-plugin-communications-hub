@@ -16,6 +16,7 @@ function segment(
     conversationId: "conversation",
     sequence,
     sourceKey: `key-${sequence}`,
+    speakerId: null,
     speaker,
     text,
     startMs,
@@ -97,6 +98,25 @@ describe("speaker grouping", () => {
     ]);
     expect(blocks).toHaveLength(1);
     expect(blocks[0]!.speaker).toBeNull();
+  });
+
+  it("keeps two speakers apart when they chose the same display name", () => {
+    // Zoom guests type their own name, so a shared one is not a shared person. Merging
+    // these would attribute one participant's words to another.
+    const first = { ...segment("Dave", "I'll take the migration.", 0, 2_000), speakerId: "111" };
+    const second = { ...segment("Dave", "No, I'm doing that.", 2_200, 4_000), speakerId: "222" };
+    const blocks = groupSegments([first, second]);
+    expect(blocks).toHaveLength(2);
+    expect(blocks.map((block) => block.text)).toEqual(["I'll take the migration.", "No, I'm doing that."]);
+  });
+
+  it("joins one speaker's run across a display-name change", () => {
+    // The identity Zoom assigns outlasts the name the participant typed.
+    const first = { ...segment("Dave", "Renaming myself,", 0, 2_000), speakerId: "111" };
+    const second = { ...segment("David Laing", "there we go.", 2_200, 4_000), speakerId: "111" };
+    const blocks = groupSegments([first, second]);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]!.text).toBe("Renaming myself, there we go.");
   });
 
   it("returns nothing for no segments", () => {

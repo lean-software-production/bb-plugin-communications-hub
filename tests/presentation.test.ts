@@ -15,6 +15,7 @@ const conversation: Conversation = {
   lastReceivedAt: null,
   captureState: "idle",
   captureDetail: null,
+  captureEndedAt: null,
   interruptionCount: 0,
   segmentCount: 0,
 };
@@ -31,6 +32,7 @@ function segment(
     conversationId: conversation.id,
     sequence,
     sourceKey: `source-key-${sequence}`,
+    speakerId: null,
     speaker,
     text,
     startMs,

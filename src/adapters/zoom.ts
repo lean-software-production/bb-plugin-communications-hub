@@ -12,6 +12,25 @@ import {
 const MAX_WEBHOOK_BYTES = 64 * 1024;
 const WEBHOOK_TOLERANCE_SECONDS = 5 * 60;
 const MAX_REPLAY_ENTRIES = 2_048;
+/** Finished captures kept addressable so a late `rtms_stopped` can still record its reason. */
+const MAX_FINISHED_CAPTURES = 64;
+
+/**
+ * Name a capture by its meeting and its occurrence.
+ *
+ * A recurring meeting keeps one meeting id but gets a fresh `meeting_uuid` every time the
+ * room fills, so the id alone repeats: leaving and rejoining 70 seconds apart produced two
+ * conversations with identical titles and no way to tell them apart in a list.
+ *
+ * The timestamp is UTC and says so. Zoom's RTMS events carry no meeting topic, so this is
+ * the most a capture can name itself; rename the conversation to describe the discussion.
+ */
+export function occurrenceTitle(meetingId: string, anchorMs: number): string {
+  const base = meetingId ? `Zoom meeting ${meetingId}` : "Zoom meeting";
+  if (!Number.isSafeInteger(anchorMs) || anchorMs < 0) return base;
+  const stamp = new Date(anchorMs).toISOString().slice(0, 16).replace("T", " ");
+  return `${base} · ${stamp}Z`;
+}
 
 const webhookEnvelopeSchema = z.object({
   event: z.string().min(1).max(100),
@@ -89,6 +108,7 @@ export function registerZoomWithDependencies(
   const activeByConversation = new Map<string, ActiveCapture>();
   const activeByStream = new Map<string, ActiveCapture>();
   const activeByOccurrence = new Map<string, ActiveCapture>();
+  const finishedByStream = new Map<string, { conversationId: string; meetingUuid: string }>();
   const replayCache = new Map<string, number>();
   let disposed = false;
 
@@ -99,6 +119,26 @@ export function registerZoomWithDependencies(
     if (activeByStream.get(capture.streamId) === capture) activeByStream.delete(capture.streamId);
     if (activeByOccurrence.get(capture.meetingUuid) === capture) {
       activeByOccurrence.delete(capture.meetingUuid);
+    }
+    rememberFinished(capture);
+  }
+
+  /**
+   * The socket and the `rtms_stopped` webhook are two observations of one event, and the
+   * socket usually wins: it ends the session, which removes the capture from the active
+   * maps before the webhook arrives. The webhook is the one carrying `stop_reason` — the
+   * only signal separating a deliberate end from a dropped connection — so a finished
+   * capture stays addressable by stream id long enough for that reason to be recorded.
+   */
+  function rememberFinished(capture: ActiveCapture): void {
+    finishedByStream.set(capture.streamId, {
+      conversationId: capture.conversationId,
+      meetingUuid: capture.meetingUuid,
+    });
+    while (finishedByStream.size > MAX_FINISHED_CAPTURES) {
+      const oldest = finishedByStream.keys().next();
+      if (oldest.done) break;
+      finishedByStream.delete(oldest.value);
     }
   }
 
@@ -169,11 +209,15 @@ export function registerZoomWithDependencies(
       !currentSettings.zoomClientSecret?.trim() ||
       !currentSettings.zoomWebhookSecret?.trim()
     ) return;
+    // Field names only, never values. The schemas use passthrough, so Zoom may be sending
+    // fields we never look at — a meeting topic among them would remove the need for an
+    // API lookup to name a conversation. Names are safe to log; payload values are not.
+    bb.log.info(`zoom rtms_started fields ${Object.keys(payload).sort().join(",")}`);
     const signalingUrl = assertSafeZoomWssUrl(payload.server_urls).href;
     const meetingId = payload.meeting_id === undefined ? "" : String(payload.meeting_id).trim();
-    const title = meetingId ? `Zoom meeting ${meetingId}` : "Zoom meeting";
     const proposedAnchor = Number.isSafeInteger(eventTs) ? eventTs : dependencies.now();
     const anchorMs = await captureAnchor(payload.meeting_uuid, proposedAnchor);
+    const title = occurrenceTitle(meetingId, anchorMs);
     currentSettings = await settings.get();
     if (
       disposed ||
@@ -194,18 +238,36 @@ export function registerZoomWithDependencies(
     }));
   }
 
+  /** Classify a Zoom `stop_reason`. Undefined means Zoom told us nothing beyond "stopped". */
+  function classifyStop(reason: number | undefined): { state: "ended" | "interrupted" | "stopped"; detail: string } {
+    if (reason !== undefined && ((reason >= 10 && reason <= 19) || reason === 24)) {
+      return { state: "interrupted", detail: `Zoom RTMS stopped after a connection failure (${reason})` };
+    }
+    if (reason === 6) return { state: "ended", detail: "Zoom meeting ended" };
+    return { state: "stopped", detail: reason === undefined ? "Zoom RTMS stopped" : `Zoom RTMS stopped (${reason})` };
+  }
+
   function finishCapture(payload: z.infer<typeof stoppedPayloadSchema>): void {
     const capture = activeByStream.get(payload.rtms_stream_id);
-    if (!capture || capture.meetingUuid !== payload.meeting_uuid) return;
-    removeActive(capture);
-    const reason = payload.stop_reason;
-    if (reason !== undefined && ((reason >= 10 && reason <= 19) || reason === 24)) {
-      capture.session.end("interrupted", `Zoom RTMS stopped after a connection failure (${reason})`);
-    } else if (reason === 6) {
-      capture.session.end("ended", "Zoom meeting ended");
-    } else {
-      capture.session.end("stopped", reason === undefined ? "Zoom RTMS stopped" : `Zoom RTMS stopped (${reason})`);
+    const target = capture ?? finishedByStream.get(payload.rtms_stream_id);
+    if (!target || target.meetingUuid !== payload.meeting_uuid) return;
+    // A newer stream for this occurrence has taken over. The old stream's stop reason
+    // describes a capture that is no longer the live one, and writing it would report the
+    // running capture as stopped.
+    if (!capture && activeByOccurrence.has(payload.meeting_uuid)) {
+      finishedByStream.delete(payload.rtms_stream_id);
+      return;
     }
+    const { state, detail } = classifyStop(payload.stop_reason);
+    if (capture) {
+      removeActive(capture);
+      capture.session.end(state, detail);
+    }
+    // Applied even when the session already went terminal from its socket. The socket
+    // reports only that the stream stopped; the webhook reports why, and recording the
+    // weaker observation first must not discard the stronger one that follows.
+    updateCapture(target.conversationId, state, detail);
+    finishedByStream.delete(payload.rtms_stream_id);
   }
 
   async function reconnectCapture(payload: z.infer<typeof interruptedPayloadSchema>): Promise<void> {

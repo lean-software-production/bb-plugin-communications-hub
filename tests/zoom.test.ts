@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { describe, expect, it } from "vitest";
 import type { CaptureState, SegmentInput, TranscriptSink } from "../src/domain.js";
-import { registerZoomWithDependencies, type ZoomAdapterDependencies } from "../src/adapters/zoom.js";
+import { occurrenceTitle, registerZoomWithDependencies, type ZoomAdapterDependencies } from "../src/adapters/zoom.js";
 import type { RtmsSocket } from "../src/adapters/zoom-protocol.js";
 
 class RecordingSink implements TranscriptSink {
@@ -48,6 +48,22 @@ function dependencies(opened: string[] = []): ZoomAdapterDependencies {
     },
   };
 }
+
+describe("occurrence titles", () => {
+  it("distinguishes two occupancy periods of one recurring meeting", () => {
+    // A recurring meeting keeps its id and gets a new meeting_uuid each time the room
+    // fills. Leaving and rejoining produced two conversations titled identically.
+    const first = occurrenceTitle("88126499248", Date.UTC(2026, 8, 11, 22, 1));
+    const second = occurrenceTitle("88126499248", Date.UTC(2026, 8, 11, 22, 5));
+    expect(first).toBe("Zoom meeting 88126499248 · 2026-09-11 22:01Z");
+    expect(second).not.toBe(first);
+  });
+
+  it("falls back to a bare name when Zoom sends no meeting id or a nonsense anchor", () => {
+    expect(occurrenceTitle("", Date.UTC(2026, 8, 11))).toBe("Zoom meeting · 2026-09-11 00:00Z");
+    expect(occurrenceTitle("123", Number.NaN)).toBe("Zoom meeting 123");
+  });
+});
 
 describe("Zoom source adapter webhook", () => {
   it("declares server-only secrets and reports configured and enabled separately", async () => {
@@ -155,7 +171,7 @@ describe("Zoom source adapter webhook", () => {
     ).toBe(204);
 
     expect(sink.ensured).toEqual([
-      { sourceId: "zoom", externalId: "meeting-uuid", title: "Zoom meeting 123 456 789" },
+      { sourceId: "zoom", externalId: "meeting-uuid", title: "Zoom meeting 123 456 789 · 2027-01-15 08:00Z" },
     ]);
     expect(sink.states[0]).toMatchObject({
       conversationId: "conversation-meeting-uuid",
@@ -235,6 +251,99 @@ describe("Zoom source adapter webhook", () => {
     expect(response.status).toBe(204);
     expect(sockets.at(-1)!.closed).toBe(false);
     expect(sink.states).toHaveLength(stateCount);
+  });
+
+  it("records the stop reason even when the socket ended the session first", async () => {
+    // Production ordering: Zoom's signaling socket reports the stream stopped, which ends
+    // the session and clears it from the active maps, and only then does the webhook
+    // arrive. The webhook carries stop_reason, the only thing separating a deliberate end
+    // from a dropped connection, so losing that race must not lose the reason.
+    const signalingHandlers: Array<{ message(data: string): void }> = [];
+    const deps: ZoomAdapterDependencies = {
+      now: () => NOW_MS,
+      socketFactory(_url, handlers): RtmsSocket {
+        signalingHandlers.push(handlers as { message(data: string): void });
+        return { send: () => undefined, close: () => undefined };
+      },
+    };
+    const host = createFakePluginHost({
+      settings: {
+        zoomClientId: "client-id",
+        zoomClientSecret: "client-secret",
+        zoomWebhookSecret: SECRET,
+        zoomEnabled: true,
+      },
+    });
+    const sink = new RecordingSink();
+    registerZoomWithDependencies(host.bb, sink, deps);
+    const event = (name: string, extra: Record<string, unknown> = {}) => JSON.stringify({
+      event: name,
+      event_ts: NOW_MS,
+      payload: {
+        meeting_uuid: "meeting-uuid",
+        meeting_id: "123",
+        is_original_host: true,
+        rtms_stream_id: "stream-1",
+        server_urls: "wss://rtms.zoom.us/signal",
+        ...extra,
+      },
+    });
+
+    await host.harness.behavior.fetchHttp("POST", "/zoom/webhook", signedRequest(event("meeting.rtms_started")));
+    // msg_type 8 with state 3 is Zoom reporting the stream stopped; the session ends here.
+    signalingHandlers[0]!.message(JSON.stringify({ msg_type: 8, state: 3 }));
+    expect(sink.states.at(-1)!.state).toBe("ended");
+    expect(sink.states.at(-1)!.detail).toBe("Zoom RTMS stream ended");
+
+    const stopped = event("meeting.rtms_stopped", { stop_reason: 6 });
+    const response = await host.harness.behavior.fetchHttp("POST", "/zoom/webhook", signedRequest(stopped));
+
+    expect(response.status).toBe(204);
+    expect(sink.states.at(-1)!.detail).toBe("Zoom meeting ended");
+  });
+
+  it("reports a connection-failure stop reason as interrupted, not a clean end", async () => {
+    // A host crash and a deliberate leave both close the socket identically. Only
+    // stop_reason tells them apart, so this is the case the race was hiding.
+    const signalingHandlers: Array<{ message(data: string): void }> = [];
+    const deps: ZoomAdapterDependencies = {
+      now: () => NOW_MS,
+      socketFactory(_url, handlers): RtmsSocket {
+        signalingHandlers.push(handlers as { message(data: string): void });
+        return { send: () => undefined, close: () => undefined };
+      },
+    };
+    const host = createFakePluginHost({
+      settings: {
+        zoomClientId: "client-id",
+        zoomClientSecret: "client-secret",
+        zoomWebhookSecret: SECRET,
+        zoomEnabled: true,
+      },
+    });
+    const sink = new RecordingSink();
+    registerZoomWithDependencies(host.bb, sink, deps);
+    const event = (name: string, extra: Record<string, unknown> = {}) => JSON.stringify({
+      event: name,
+      event_ts: NOW_MS,
+      payload: {
+        meeting_uuid: "meeting-uuid",
+        meeting_id: "123",
+        is_original_host: true,
+        rtms_stream_id: "stream-1",
+        server_urls: "wss://rtms.zoom.us/signal",
+        ...extra,
+      },
+    });
+
+    await host.harness.behavior.fetchHttp("POST", "/zoom/webhook", signedRequest(event("meeting.rtms_started")));
+    signalingHandlers[0]!.message(JSON.stringify({ msg_type: 8, state: 3 }));
+    const stopped = event("meeting.rtms_stopped", { stop_reason: 12 });
+
+    await host.harness.behavior.fetchHttp("POST", "/zoom/webhook", signedRequest(stopped));
+
+    expect(sink.states.at(-1)!.state).toBe("interrupted");
+    expect(sink.states.at(-1)!.detail).toContain("connection failure (12)");
   });
 
   it("closes capture resources during BB disposal", async () => {

@@ -19,6 +19,7 @@ const conversation: Conversation = {
   lastReceivedAt: Date.UTC(2026, 8, 10, 9, 5),
   captureState: "idle",
   captureDetail: null,
+  captureEndedAt: null,
   interruptionCount: 0,
   segmentCount: 2,
 };
@@ -29,6 +30,7 @@ const segments: TranscriptSegment[] = [
     conversationId: conversation.id,
     sequence: 7,
     sourceKey: "cue-7",
+    speakerId: null,
     speaker: "Ada",
     text: "Ship the transcript reader.",
     startMs: 12_000,
@@ -40,6 +42,7 @@ const segments: TranscriptSegment[] = [
     conversationId: conversation.id,
     sequence: 8,
     sourceKey: "cue-8",
+    speakerId: null,
     speaker: "Ben",
     text: "Add stable citations too.",
     startMs: 16_000,
@@ -57,6 +60,7 @@ const interleavedSegments: TranscriptSegment[] = [
     conversationId: conversation.id,
     sequence: 9,
     sourceKey: "cue-9",
+    speakerId: null,
     speaker: "Ada",
     text: "And the reader ships Friday.",
     startMs: 17_500,
@@ -75,6 +79,7 @@ function handlers(
       nextOffset: 1,
     }),
     "conversations.get": () => conversation,
+    "conversations.rename": ({ title }: { title: string }) => ({ ...conversation, title }),
     "transcripts.import": () => conversation,
     "transcripts.read": () => ({
       conversation,
@@ -183,6 +188,26 @@ describe("Communications Hub app", () => {
     });
     expect(slot.getByText("Referenced passage")).toBeTruthy();
     expect(slot.getByText("+0:12")).toBeTruthy();
+  });
+
+  it("renames a conversation from the transcript view", async () => {
+    // Zoom names a capture after its meeting id and start; only a human can name the
+    // discussion. The title has to be editable where it is read.
+    const app = await loadPluginApp(() => import("../app"));
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "conversation-1" }, { rpc: handlers() });
+    await slot.findByText("Ship the transcript reader.");
+
+    fireEvent.click(slot.getByRole("button", { name: "Rename conversation" }));
+    fireEvent.change(slot.getByLabelText("Conversation title"), {
+      target: { value: "Attribution design" },
+    });
+    fireEvent.click(slot.getByRole("button", { name: "Save" }));
+
+    await slot.findByText("Attribution design");
+    expect(slot.inspection.rpcCalls).toContainEqual({
+      method: "conversations.rename",
+      input: { conversationId: "conversation-1", title: "Attribution design" },
+    });
   });
 
   it("uses a transcript file extension as the import format", async () => {

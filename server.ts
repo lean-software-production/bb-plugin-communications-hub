@@ -17,6 +17,7 @@ const usage=`bb communications commands (JSON output):
   read <conversation-id> [after-sequence] [limit]
   search <conversation-id> <query> [after-sequence]
   acknowledge <conversation-id> <sequence> [thread-id]
+  rename <conversation-id> <title>
   status
 Use the Communications panel to import files. Omitted thread-id uses the invoking BB thread.`;
 
@@ -45,6 +46,7 @@ export default async function plugin(bb:BbPluginApi) {
   bb.rpc.register(rpcContract,{
     'conversations.list':input=>hub.listConversations(input),
     'conversations.get':({conversationId})=>hub.getConversation(conversationId),
+    'conversations.rename':({conversationId,title})=>hub.renameConversation(conversationId,title),
     'transcripts.import':importTranscript,
     'transcripts.read':({conversationId,...options})=>hub.readTranscript(conversationId,options),
     'transcripts.search':({conversationId,...options})=>hub.searchTranscript(conversationId,options),
@@ -83,6 +85,7 @@ export default async function plugin(bb:BbPluginApi) {
     {name:'read',summary:'Read a transcript page',usage:'bb communications read <conversation-id> [after-sequence] [limit]'},
     {name:'search',summary:'Search a transcript',usage:'bb communications search <conversation-id> <query> [after-sequence]'},
     {name:'acknowledge',summary:'Advance a thread reading cursor',usage:'bb communications acknowledge <conversation-id> <sequence> [thread-id]'},
+    {name:'rename',summary:'Rename a conversation',usage:'bb communications rename <conversation-id> <title>'},
     {name:'status',summary:'Show source readiness',usage:'bb communications status'},
   ],async run(argv,ctx){
     const [command,...a]=argv;
@@ -99,6 +102,7 @@ export default async function plugin(bb:BbPluginApi) {
         case 'read':if(a.length<1||a.length>3)throw new Error(usage);result=readPayload(hub.readTranscript(a[0],{after:a[1]===undefined?0:Number(a[1]),limit:a[2]===undefined?20:Number(a[2])}));break;
         case 'search':if(a.length<2||a.length>3)throw new Error(usage);result=searchPayload(hub.searchTranscript(a[0],{query:a[1],after:a[2]===undefined?0:Number(a[2])}));break;
         case 'acknowledge':if(a.length<2||a.length>3)throw new Error(usage);result=hub.acknowledge(thread(a[2]),a[0],Number(a[1]));break;
+        case 'rename':if(a.length!==2)throw new Error(usage);result=hub.renameConversation(a[0]!,a[1]!);break;
         case 'status':if(a.length)throw new Error(usage);result=await sources();break;
         default:throw new Error(usage);
       }

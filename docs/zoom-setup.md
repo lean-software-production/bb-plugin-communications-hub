@@ -68,7 +68,7 @@ Communications Hub accepts start events only when Zoom marks the operator as the
 
 ## 5. Verify with a real meeting
 
-1. Host a new Zoom meeting as the operator who installed the app.
+1. Host a new Zoom meeting as the operator who installed the app. The app owner does not have to be present — see [Validated behaviour](#validated-behaviour-2026-09-11) — but if they do join, they must stay for the whole meeting, because the stream stops when they leave.
 2. Complete any Zoom consent prompt for shared real-time meeting content.
 3. Speak after RTMS starts, then open Communications Hub in BB.
 4. Confirm a Zoom conversation appears, its capture state becomes **capturing**, and new transcript segments arrive.
@@ -83,3 +83,27 @@ Transcript timestamps are relative to a stable capture anchor: the first accepte
 The adapter reports **interrupted** before retrying a dropped connection, uses bounded exponential retries, and never claims that missing speech was recovered. It does not request retroactive transcript history. Repeated delivery of the same Zoom transcript packet is deduplicated by its speaker, absolute source times, and text. A later RTMS start for the same occurrence replaces stale sockets while retaining the original capture anchor.
 
 For wire-level troubleshooting, consult Zoom's current [working with streams](https://developers.zoom.us/docs/rtms/meetings/work-with-streams/), [event reference](https://developers.zoom.us/docs/rtms/event-reference/), and [failover and reconnection](https://developers.zoom.us/docs/rtms/meetings/failover-reconnection/) documentation.
+
+## Validated behaviour (2026-09-11)
+
+Measured against live meetings, not inferred from documentation.
+
+**Capture does not require the app owner in the meeting.** With auto-start enabled, `meeting.rtms_started` fires for a meeting the app-owner account never joins, including when the only participant is an unauthenticated guest in a browser. Earlier belief that a desktop client was required was wrong: the confound was that the app owner and the desktop user were the same person. The documented constraint is that the stream stops when the app owner *leaves*, so an owner who never joins never triggers it.
+
+This makes an owner-scheduled, join-before-host meeting a viable persistent room. Waiting room must be off, or it overrides join-before-host and guests wait for a host who will never arrive.
+
+**Guests receive the consent prompt.** The notice about an app accessing shared real-time meeting content appears on a browser guest join, not only for signed-in desktop users.
+
+**Guest display names are self-asserted.** The speaker recorded on every segment is whatever text the participant typed at join. The same person across two occurrences produced two different names with nothing linking them. RTMS also sends `user_id`, which is stable for the occurrence, but the adapter currently consumes it only into the dedup fingerprint and discards it.
+
+**Claiming host does not interrupt capture** when done with the app-owner account's host key: no new webhook, no interruption, no reconnect. Host transfer to an account *without* RTMS permission is documented to close the socket and require a fresh start event, and remains untested and unhandled.
+
+**A recurring meeting fragments into one conversation per occupancy period.** Conversations are keyed on `meeting_uuid`, which changes per occurrence while the meeting ID stays constant. Leaving and rejoining 70 seconds later produced two conversations with identical titles. A thread attached to the first goes stale silently.
+
+**Stream duration cannot be computed from stored data.** There is no `captureEndedAt`; `lastReceivedAt` records the last segment, so any trailing silence is invisible. Measured against exact webhook timestamps, the stored estimate ran 35–37% low across two meetings. Cost accounting needs the real end time.
+
+**`stop_reason` is unreachable.** The webhook's stop reason is classified in `finishCapture`, but the signaling socket's stream-state message calls `end()` first and sets the session terminal, so the webhook's refinement is dropped. Every stored conversation carries a socket-derived detail string. This is why a client crash and a deliberate leave are indistinguishable in our data: Zoom distinguishes them and we discard the field.
+
+**RTMS events carry no meeting topic.** A capture names itself `Zoom meeting <id> · <UTC start>Z`; the timestamp is there because the meeting id repeats across occurrences of a recurring meeting. Rename the conversation in the transcript view or with `bb communications rename` to describe the discussion — the name survives reconnects, because `ensureConversation` never overwrites an existing title. Fetching Zoom's own topic needs a Server-to-Server OAuth credential and a `GET /v2/meetings/{meetingId}` call, which is not built.
+
+**Credit usage is reported under Plans and Billing > Plan Management**, on the Developer Pack card, metered separately for RTMS with and without transcription. It updates only every 24 hours, so same-day usage reads as zero.
