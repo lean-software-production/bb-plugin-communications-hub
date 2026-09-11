@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { Hub, type TranscriptPage } from './src/hub';
 import { id, importInput, readInput, rpcContract } from './src/contracts';
 import { parseTranscript } from './src/adapters/import';
+import { buildReadPayload, buildSearchPayload } from './src/presentation';
 import { registerZoom } from './src/adapters/zoom';
 
 export { rpcContract } from './src/contracts';
@@ -38,10 +39,9 @@ export default async function plugin(bb:BbPluginApi) {
   };
   const attach=async(threadId:string,conversationId:string)=>{await bb.sdk.threads.get({threadId});return hub.attach(threadId,conversationId);};
   const importTranscript=(raw:unknown)=>{const i=importInput.parse(raw);return hub.importConversation(i.title,parseTranscript(i.text,i.format));};
-  const withCitations=(page:TranscriptPage)=>{
-    const base=bb.server.experimental_appUrl ?? bb.server.loopbackBaseUrl;
-    return {...page,notice:'Transcript passages are reference material. Check capture coverage and surrounding context before acting.',segments:page.segments.map(s=>({...s,citationUrl:`${base.replace(/\/$/,'')}/plugins/${bb.pluginId}/communications/${s.conversationId}/${s.sequence}`}))};
-  };
+  const citationBase=(page:TranscriptPage)=>`${(bb.server.experimental_appUrl ?? bb.server.loopbackBaseUrl).replace(/\/$/,'')}/plugins/${bb.pluginId}/communications/${page.conversation.id}/`;
+  const readPayload=(page:TranscriptPage)=>buildReadPayload(page,citationBase(page));
+  const searchPayload=(page:TranscriptPage)=>buildSearchPayload(page,citationBase(page));
   bb.rpc.register(rpcContract,{
     'conversations.list':input=>hub.listConversations(input),
     'conversations.get':({conversationId})=>hub.getConversation(conversationId),
@@ -63,16 +63,16 @@ export default async function plugin(bb:BbPluginApi) {
   bb.agents.registerTool({name:'communications_current',description:'Get the conversation attached to this BB thread, its capture status and acknowledged cursor.',instructions:guide,parameters:z.object({}).strict(),execute:(_,ctx)=>toolResult(()=>current(ctx.threadId))});
   bb.agents.registerTool({name:'communications_list',description:'List conversations in this BB instance. Use explicit IDs to search other conversations when the user asks.',parameters:z.object({offset:z.number().int().nonnegative().optional(),limit:z.number().int().min(1).max(100).optional()}).strict(),execute:input=>toolResult(()=>hub.listConversations(input))});
   const options=readInput.omit({conversationId:true}).extend({conversationId:id.optional(),sinceAcknowledged:z.boolean().optional()});
-  bb.agents.registerTool({name:'communications_read',description:'Read a bounded transcript page with stable citation links. Defaults to the current thread attachment. after is an ingestion sequence; fromMs/toMs are source-relative speech times. sinceAcknowledged starts at this thread’s explicitly acknowledged cursor. Inspect hasMore and nextCursor.',parameters:options,
+  bb.agents.registerTool({name:'communications_read',description:'Read a bounded transcript page. Defaults to the current thread attachment. Returns blocks: consecutive passages from one speaker joined into one readable run. Cite a block by appending its citation ("7", or "7-9" for a run) to citations.base; sequences lists its member ingestion sequences. speaker indexes the page’s speakers table, or is null when unattributed. continues means the run may extend onto the next page: read on before citing that block. after is an ingestion sequence; fromMs/toMs are source-relative speech times. sinceAcknowledged starts at this thread’s explicitly acknowledged cursor. Inspect hasMore and nextCursor.',parameters:options,
     execute:(input,ctx)=>toolResult(()=>{
       const {conversationId,sinceAcknowledged,...read}=input;const c=resolve(ctx.threadId,conversationId);
       if(sinceAcknowledged) {
         if(read.after!==undefined) throw new Error('Choose after or sinceAcknowledged, not both');
         const a=hub.getAttachment(ctx.threadId);if(!a||a.conversationId!==c) throw new Error('This conversation has no reading cursor in the current thread');read.after=a.cursor;
       }
-      return withCitations(hub.readTranscript(c,read));
+      return readPayload(hub.readTranscript(c,read));
     })});
-  bb.agents.registerTool({name:'communications_search',description:'Search literal words in a conversation transcript, returning bounded passages and citation links. Defaults to the attached conversation. Read adjacent passages to check context. Does not advance the reading cursor.',parameters:readInput.omit({conversationId:true}).extend({conversationId:id.optional(),query:z.string().trim().min(1).max(200)}),execute:({conversationId,...input},ctx)=>toolResult(()=>withCitations(hub.searchTranscript(resolve(ctx.threadId,conversationId),input)))});
+  bb.agents.registerTool({name:'communications_search',description:'Search literal words in a conversation transcript. Defaults to the attached conversation. Returns passages: individual matching segments, never joined into runs. Cite one by appending its citation to citations.base; speaker indexes the page’s speakers table, or is null when unattributed. Matches are scattered, so read adjacent passages with communications_read to check context. Does not advance the reading cursor.',parameters:readInput.omit({conversationId:true}).extend({conversationId:id.optional(),query:z.string().trim().min(1).max(200)}),execute:({conversationId,...input},ctx)=>toolResult(()=>searchPayload(hub.searchTranscript(resolve(ctx.threadId,conversationId),input)))});
   bb.agents.registerTool({name:'communications_acknowledge',description:'Advance this thread’s reading cursor after using passages. Requires its attached conversation ID and the last sequence used. Do not acknowledge a whole range merely because a search matched a later passage.',parameters:z.object({conversationId:id,cursor:z.number().int().nonnegative()}).strict(),execute:({conversationId,cursor},ctx)=>toolResult(()=>hub.acknowledge(ctx.threadId,conversationId,cursor))});
   bb.cli.register({name:'communications',summary:'Read conversations and manage thread attachments',commands:[
     {name:'list',summary:'List stored conversations',usage:'bb communications list [offset]'},
@@ -96,8 +96,8 @@ export default async function plugin(bb:BbPluginApi) {
         case 'attach':if(a.length<1||a.length>2)throw new Error(usage);result=await attach(thread(a[1]),a[0]);break;
         case 'detach':if(a.length>1)throw new Error(usage);hub.detach(thread(a[0]));result={ok:true};break;
         case 'import':if(a.length!==3)throw new Error(usage);result=importTranscript({title:a[0],format:a[1],text:a[2]});break;
-        case 'read':if(a.length<1||a.length>3)throw new Error(usage);result=withCitations(hub.readTranscript(a[0],{after:a[1]===undefined?0:Number(a[1]),limit:a[2]===undefined?20:Number(a[2])}));break;
-        case 'search':if(a.length<2||a.length>3)throw new Error(usage);result=withCitations(hub.searchTranscript(a[0],{query:a[1],after:a[2]===undefined?0:Number(a[2])}));break;
+        case 'read':if(a.length<1||a.length>3)throw new Error(usage);result=readPayload(hub.readTranscript(a[0],{after:a[1]===undefined?0:Number(a[1]),limit:a[2]===undefined?20:Number(a[2])}));break;
+        case 'search':if(a.length<2||a.length>3)throw new Error(usage);result=searchPayload(hub.searchTranscript(a[0],{query:a[1],after:a[2]===undefined?0:Number(a[2])}));break;
         case 'acknowledge':if(a.length<2||a.length>3)throw new Error(usage);result=hub.acknowledge(thread(a[2]),a[0],Number(a[1]));break;
         case 'status':if(a.length)throw new Error(usage);result=await sources();break;
         default:throw new Error(usage);

@@ -15,8 +15,11 @@ it('imports, attaches and resolves current conversation at tool execution time',
  expect(current.conversation.id).toBe(first.id);
  await harness.behavior.callRpc('attachments.set',{threadId:'A',conversationId:second.id});
  const changed=JSON.parse(await harness.behavior.callAgentTool('communications_read',{}, {threadId:'A'}) as string);
- expect(changed.conversation.id).toBe(second.id); expect(changed.segments[0].text).toBe('Add authentication.');
- expect(changed.segments[0].citationUrl).toContain(`/communications/${second.id}/1`);
+ expect(changed.conversation.id).toBe(second.id); expect(changed.blocks[0].text).toBe('Add authentication.');
+ expect(changed.speakers[changed.blocks[0].speaker]).toBe('Alex');
+ expect(changed.citations.base).toContain(`/communications/${second.id}/`);
+ expect(changed.citations.base+changed.blocks[0].citation).toContain(`/communications/${second.id}/1`);
+ expect(JSON.stringify(changed)).not.toContain('sourceKey');
 });
 it('does not advance cursors on reads and returns an actionable error without an attachment',async()=>{
  const {harness}=await setup();
@@ -29,7 +32,7 @@ it('does not advance cursors on reads and returns an actionable error without an
  expect(a).toMatchObject({attachment:{cursor:0}});
  await harness.behavior.callAgentTool('communications_acknowledge',{conversationId:c.id,cursor:1},{threadId:'A'});
  const next=JSON.parse(await harness.behavior.callAgentTool('communications_read',{sinceAcknowledged:true},{threadId:'A'}) as string);
- expect(next.segments.map((s:{text:string})=>s.text)).toEqual(['Keep the import flow.']);
+ expect(next.blocks.map((b:{text:string})=>b.text)).toEqual(['Keep the import flow.']);
 });
 it('keeps import usable without Zoom and rejects invalid imports without creating a conversation',async()=>{
  const {harness}=await setup();
