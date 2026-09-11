@@ -13,12 +13,12 @@ const idSchema = z.string().trim().min(1).max(256);
 export const migrations = [
   `CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY, sourceId TEXT NOT NULL, externalId TEXT NOT NULL, title TEXT NOT NULL,
-    createdAt INTEGER NOT NULL, captureStartedAt INTEGER, lastReceivedAt INTEGER, captureEndedAt INTEGER,
+    createdAt INTEGER NOT NULL, captureStartedAt INTEGER, lastReceivedAt INTEGER,
     captureState TEXT NOT NULL DEFAULT 'idle', captureDetail TEXT, interruptionCount INTEGER NOT NULL DEFAULT 0,
     UNIQUE(sourceId, externalId))`,
   `CREATE TABLE IF NOT EXISTS segments (
     id TEXT NOT NULL UNIQUE, conversationId TEXT NOT NULL REFERENCES conversations(id),
-    sequence INTEGER NOT NULL, sourceKey TEXT NOT NULL, speaker TEXT, speakerId TEXT, text TEXT NOT NULL,
+    sequence INTEGER NOT NULL, sourceKey TEXT NOT NULL, speaker TEXT, text TEXT NOT NULL,
     startMs INTEGER, endMs INTEGER, receivedAt INTEGER NOT NULL,
     UNIQUE(conversationId, sourceKey), UNIQUE(conversationId, sequence))`,
   `CREATE VIRTUAL TABLE IF NOT EXISTS segment_search USING fts5(text, content='segments', content_rowid='rowid')`,
@@ -37,10 +37,14 @@ export class Hub {
   /**
    * Add columns introduced after a table was first created.
    *
-   * `CREATE TABLE IF NOT EXISTS` is a no-op on an existing database, and SQLite
-   * has no `ADD COLUMN IF NOT EXISTS`, so an ALTER in `migrations` would throw
-   * on every run after the first. Checking the current shape is idempotent
-   * whether migrations ran once (BB) or on every construction (tests).
+   * The statements in `migrations` are immutable: BB records them by index and
+   * refuses to load a plugin that edits one, so a new column cannot be added to
+   * an existing CREATE TABLE. Appending an ALTER does not work either, because
+   * SQLite has no `ADD COLUMN IF NOT EXISTS` and the non-BB path replays every
+   * statement on each construction.
+   *
+   * Checking the current shape is idempotent under both, and covers a fresh
+   * database and an upgraded one by the same route.
    */
   private ensureColumns() {
     const additions: [string, string, string][] = [
