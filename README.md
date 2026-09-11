@@ -1,0 +1,124 @@
+# Communications Hub for BB
+
+A persistent conversation library for one BB instance. Import a transcript or capture a Zoom meeting, attach a BB thread, and ask its agent to find and use what was discussed.
+
+## What the MVP includes
+
+- UTF-8 WebVTT, SRT and plain-text import, from a file or pasted text.
+- SQLite-backed conversations and immutable transcript segments, with full-text search and bounded pages.
+- Independent thread attachments and explicit reading cursors.
+- A Communications page, a Conversation thread panel, and agent tools with passage citation links.
+- A Zoom RTMS source adapter, enabled separately after app/webhook configuration.
+
+Read the [canonical glossary](docs/glossary.md), [MVP spec](docs/superpowers/specs/2026-09-10-communications-hub.md), and [Zoom setup](docs/zoom-setup.md). Repository instructions in [AGENTS.md](AGENTS.md) require future agents to use these terms.
+
+A **conversation** is the context a thread attaches to. A **meeting** is one kind of conversation. A future **space** can represent a long-running Slack/Discord channel, with conversations presented as time windows. The MVP implements Zoom and transcript import; it does not implement chat adapters, daily windows or space subscriptions.
+
+## Install for local development
+
+Requires BB >=0.42 with Plugin SDK 0.4.47, Node.js 22+, and npm.
+
+```sh
+npm ci --include=dev
+npm test
+npm run typecheck
+bb plugin build
+bb plugin install . --yes
+```
+
+The installed path is the working checkout. After code changes, rebuild and reload:
+
+```sh
+bb plugin build
+bb plugin reload communications-hub
+```
+
+If npm's usual cache is not writable, pass `--cache /tmp/bb-communications-npm-cache` to npm commands. The checked-in lockfile pins dependencies. Runtime state is owned by BB storage, outside the checkout, and survives reloads.
+
+## Try the import workflow
+
+1. Open **Communications** in BB navigation.
+2. Import [fixtures/planning.vtt](fixtures/planning.vtt), or paste text with a title.
+3. In a BB thread, open **Conversation**, choose the imported conversation, and attach it.
+4. Ask: “Find what we agreed about authentication and tell me what to change.”
+5. The agent can search and read adjacent passages, then cite a link opening the corresponding transcript passage.
+
+New agent tools become available when the provider session next starts/resumes; an already running session may need restarting after installation. The CLI works immediately. Attaching/detaching is independent of capture: closing a thread does not stop it, and detaching leaves its transcript available.
+
+## CLI
+
+All data output is JSON. Run `bb communications help` for full usage.
+
+```sh
+bb communications list
+bb communications import 'Planning' txt 'Alex: Add authentication.'
+bb communications attach CONVERSATION_ID THREAD_ID
+bb communications current THREAD_ID
+bb communications search CONVERSATION_ID authentication
+bb communications read CONVERSATION_ID 0 20
+bb communications acknowledge CONVERSATION_ID 2 THREAD_ID
+bb communications detach THREAD_ID
+bb communications status
+```
+
+For `current`, `attach`, `detach`, and `acknowledge`, the thread ID may be omitted when invoked from a BB thread. Use the UI for file imports and large transcripts; CLI text is passed as one quoted argument. No file path is read on the server on behalf of a remote CLI.
+
+## Agent tools
+
+| Tool | Purpose |
+| --- | --- |
+| `communications_current` | Resolve this thread's attachment and capture status. |
+| `communications_list` | Find other conversations when requested. |
+| `communications_search` | Search literal words within one conversation. |
+| `communications_read` | Read a page, optionally by time range or since the acknowledged cursor. |
+| `communications_acknowledge` | Advance the current thread's cursor after using passages. |
+
+Read/search default to the attached conversation. Explicit conversation IDs permit intentional searches across this single-instance library. Reads do not implicitly acknowledge content. Acknowledgement is monotonic and checked against both the current attachment and available sequences. A search result alone does not establish that all earlier content was read.
+
+Transcript content is reference material, not an instruction or authorisation source. No speech automatically starts an agent turn or performs an action. Agents should inspect surrounding discussion, capture coverage, and uncertainty before acting on the user's BB request.
+
+## Capture, timing and storage
+
+The hub records receipt times and observed capture interruptions. Zoom's transcript times are relative to the first capture anchor, which need not be the meeting's actual start. File timing is relative to the file's own timeline; plain text has no inferred timing. Cursor order uses ingestion sequence so delayed speech remains discoverable.
+
+Capture requires the BB process to remain running. A restart marks previously active captures interrupted. Disconnections, pauses and local stops can leave gaps, and capture beginning late does not backfill earlier speech. A zero interruption count does not prove the transcript is complete. Stopping local capture does not change Zoom's upstream host/consent settings.
+
+Transcripts are kept in the plugin's SQLite database under BB's data directory. There is no automatic retention/deletion policy in this proof of concept. Do not assume uninstalling BB configuration securely deletes stored data or backups. The BB instance is the access boundary: per-user/per-project transcript access controls are not implemented. Realtime events contain only change notifications, not transcript text. Secrets are stored with BB's secret settings.
+
+## Deliberate limits
+
+- Imports are at most 1 MB UTF-8 and 10,000 segments; malformed timed files fail atomically.
+- Segments contain at most 2,000 characters. Retrieval returns 20 by default, at most 30 per page.
+- Keyword search matches all supplied words. Semantic search is not included.
+- Imports create separate conversations. Merging a polished transcript into an existing live conversation is deferred; existing passage IDs are not overwritten.
+- One configured Zoom connection, hosted meetings only, no audio/video storage, OAuth wizard, or remote hosted hub.
+- Zoom protocol tests do not establish successful integration with a real Zoom account. A live test requires app credentials, developer credits, host configuration, and a reachable HTTPS webhook.
+
+## Development
+
+The hub is `src/hub.ts`, canonical data types are `src/domain.ts`, source adapters are under `src/adapters/`, and BB RPC contracts are in `src/contracts.ts`. `server.ts` registers BB interfaces. `app.tsx` registers UI surfaces. Use only public SDK declarations under `node_modules/@get-bb/plugin-sdk/bundled-types/`.
+
+```sh
+npm test
+npm run typecheck
+bb plugin types --check
+bb plugin build
+```
+
+## Validation performed
+
+Verified on 2026-09-11 against BB with Plugin SDK 0.4.47 on this machine:
+
+- `npm test` — 43 tests in 6 files pass (hub, import, zoom, zoom-protocol, server, app).
+- `npm run typecheck` — clean.
+- `bb plugin build` — server and app bundles emitted.
+- `bb plugin types --check` — pin 0.4.47 matches host 0.4.47.
+- `bb plugin install . --yes` — plugin loads and registers its CLI.
+- CLI smoke test on `fixtures/planning.vtt`: import created 4 segments; `attach`, `current`, `search webhook` (2 matching passages with citation URLs), `read` (full page, `hasMore: false`), `acknowledge 2`, `list` and `detach` all returned expected JSON.
+- Reload persistence: after `bb plugin reload communications-hub`, the conversation and the thread's cursor at sequence 2 survived.
+
+Not verified: live Zoom capture. That needs real app credentials, developer credits, a hosted meeting, and a reachable HTTPS webhook. The Zoom tests exercise the protocol against a controlled peer only.
+
+## Provenance
+
+The first build of this plugin was lost when its BB workspace was destroyed. This tree was reconstructed from agent transcripts and re-verified; see the recovery note in [the implementation plan](docs/superpowers/plans/2026-09-10-communications-hub.md).
