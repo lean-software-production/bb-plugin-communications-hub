@@ -22,6 +22,19 @@ https://communications.example.com/api/v1/plugins/<plugin-id>/http/zoom/webhook
 
 The adapter authenticates this unauthenticated HTTP route itself. It checks Zoom's `x-zm-request-timestamp` and `x-zm-signature` against the unmodified request body, accepts a five-minute clock window, and rejects replayed signatures. A gateway must preserve the body bytes and these headers.
 
+### A local gateway and tunnel for testing
+
+`tools/zoom-webhook-gateway.mjs` is a minimal gateway for a development machine. It listens on a local port, forwards only the exact webhook path to the BB server with the body bytes and Zoom signature headers unmodified, and answers every other path with 404.
+
+```sh
+node tools/zoom-webhook-gateway.mjs --port 8787
+cloudflared tunnel --url http://127.0.0.1:8787 --no-autoupdate
+```
+
+Point the tunnel at the gateway port, never at the BB server port. A quick `trycloudflare.com` tunnel needs no Cloudflare account, but its hostname changes on every restart, so Zoom's endpoint URL must be re-entered and re-validated each session. Use a named tunnel or another stable host for anything beyond a single test.
+
+Check the published endpoint before configuring Zoom. Before the webhook secret is set, BB answers the webhook path with `503 Zoom webhook is not configured`; any other path must answer 404 at the gateway.
+
 ## 2. Create the Zoom app
 
 1. In the [Zoom App Marketplace](https://marketplace.zoom.us/), create a user-managed General app.

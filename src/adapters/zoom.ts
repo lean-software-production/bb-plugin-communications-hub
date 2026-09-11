@@ -128,6 +128,7 @@ export function registerZoomWithDependencies(
         }
       },
       onState: (state, detail) => updateCapture(input.conversationId, state, detail),
+      log: (message) => bb.log.warn(message),
       onTerminal: () => {
         if (capture) removeActive(capture);
       },

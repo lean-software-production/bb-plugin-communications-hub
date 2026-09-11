@@ -109,7 +109,7 @@ bb plugin build
 
 Verified on 2026-09-11 against BB with Plugin SDK 0.4.47 on this machine:
 
-- `npm test` — 43 tests in 6 files pass (hub, import, zoom, zoom-protocol, server, app).
+- `npm test` — 46 tests in 6 files pass (hub, import, zoom, zoom-protocol, server, app).
 - `npm run typecheck` — clean.
 - `bb plugin build` — server and app bundles emitted.
 - `bb plugin types --check` — pin 0.4.47 matches host 0.4.47.
@@ -117,7 +117,11 @@ Verified on 2026-09-11 against BB with Plugin SDK 0.4.47 on this machine:
 - CLI smoke test on `fixtures/planning.vtt`: import created 4 segments; `attach`, `current`, `search webhook` (2 matching passages with citation URLs), `read` (full page, `hasMore: false`), `acknowledge 2`, `list` and `detach` all returned expected JSON.
 - Reload persistence: after `bb plugin reload communications-hub`, the conversation and the thread's cursor at sequence 2 survived.
 
-Not verified: live Zoom capture. That needs real app credentials, developer credits, a hosted meeting, and a reachable HTTPS webhook. The Zoom tests exercise the protocol against a controlled peer only.
+Live Zoom capture was verified on 2026-09-11 against a real hosted meeting: a user-managed General app in Development mode, a Zoom Developer Pack trial for RTMS credits, and the webhook published through `tools/zoom-webhook-gateway.mjs` behind a `cloudflared` tunnel. The run produced 308 transcript segments with speaker attribution, no interruptions, and a clean `ended` state, ingested 0.5–2.1 seconds after each utterance finished.
+
+That run also exposed a real defect. The SSRF guard resolved the RTMS host itself and always answered with a single address, but Node calls `lookup` with `all: true` whenever `autoSelectFamily` is on — its default — and then expects the whole array. Every signaling socket failed with `Invalid IP address: undefined` and closed at code 1006 before the handshake. `createPublicOnlyLookup` now answers in the shape the caller asked for, and still drops private and special-use addresses in both paths.
+
+Capture ended mid-meeting when the host's Zoom client crashed. Zoom reported an ordinary stop, so the conversation reads as `ended` with `interruptionCount: 0` despite missing every later utterance — a concrete case of why a zero interruption count does not prove a transcript is complete.
 
 ## Provenance
 
