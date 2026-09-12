@@ -190,6 +190,23 @@ describe("registrants", () => {
     await expect(new ZoomApi(credentials, dependencies).renewRoomMeeting("1")).resolves.toBeGreaterThan(0);
   });
 
+  it("deletes a meeting at Zoom", async () => {
+    const { calls, dependencies } = stub([new Response(null, { status: 204 })]);
+
+    await new ZoomApi(credentials, dependencies).deleteMeeting("88800011122");
+
+    const request = calls.at(-1)!;
+    expect(request.init?.method).toBe("DELETE");
+    expect(request.url).toBe("https://api.zoom.us/v2/meetings/88800011122");
+  });
+
+  it("reports a refused deletion rather than claiming the meeting is gone", async () => {
+    // Recording a deletion that did not happen would leave the hub saying a room is unreachable
+    // while its links still work.
+    const { dependencies } = stub([jsonResponse({ code: 4711 }, 400)]);
+    await expect(new ZoomApi(credentials, dependencies).deleteMeeting("1")).rejects.toThrow(/400/);
+  });
+
   it("dates a room's expiry from its recurrence", async () => {
     const now = Date.UTC(2026, 8, 12);
     const { dependencies } = stub([jsonResponse(meeting)], { now: () => now });

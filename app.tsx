@@ -528,6 +528,8 @@ function Rooms() {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  // Deleting kills every link into a room, so it asks once rather than acting on one click.
+  const [confirming, setConfirming] = useState<string | null>(null);
   const refetch = useCallback(() => {
     rpc.call("rooms.list", {}).then(
       (value) => { setRooms(value.rooms); setError(null); },
@@ -585,6 +587,15 @@ function Rooms() {
                   try { await rpc.call("rooms.archive", { roomId: room.id }); setError(null); refetch(); }
                   catch (cause) { setError(errorText(cause)); }
                 }}>Archive</Button>
+                {confirming === room.id ? (
+                  <Button type="button" size="sm" variant="destructive" onClick={async () => {
+                    setConfirming(null);
+                    try { await rpc.call("rooms.delete", { roomId: room.id }); setError(null); refetch(); }
+                    catch (cause) { setError(errorText(cause)); }
+                  }}>Confirm: kill every link</Button>
+                ) : (
+                  <Button type="button" size="sm" variant="ghost" onClick={() => setConfirming(room.id)}>Delete at Zoom</Button>
+                )}
               </div>
               <div className="w-full"><RoomRegistrants room={room} /></div>
             </li>

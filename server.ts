@@ -23,6 +23,7 @@ const usage=`bb communications commands (JSON output):
   create-room <name>
   archive-room <room-id>
   renew-room <room-id>
+  delete-room <room-id>
   registrants <room-id>
   register <room-id> <name> <email>
   status
@@ -77,6 +78,7 @@ export default async function plugin(bb:BbPluginApi) {
     'rooms.create':({name})=>zoom.createRoom(name),
     'rooms.archive':({roomId})=>hub.archiveRoom(roomId),
     'rooms.renew':({roomId})=>zoom.renewRoom(roomId),
+    'rooms.delete':({roomId})=>zoom.deleteRoom(roomId),
     'registrants.list':({roomId})=>hub.listRegistrants(roomId),
     'registrants.add':({roomId,name,email})=>zoom.addRegistrant(roomId,{name,email}),
     'capture.stop':({conversationId})=>{hub.getConversation(conversationId);zoom.stop(conversationId);return hub.getConversation(conversationId);},
@@ -116,6 +118,7 @@ export default async function plugin(bb:BbPluginApi) {
     {name:'create-room',summary:'Create a reusable Zoom meeting room',usage:'bb communications create-room <name>'},
     {name:'archive-room',summary:'Archive a room locally without deleting the Zoom meeting',usage:'bb communications archive-room <room-id>'},
     {name:'renew-room',summary:'Push a room expiry out without changing its links',usage:'bb communications renew-room <room-id>'},
+    {name:'delete-room',summary:'Delete a room at Zoom, killing every link into it',usage:'bb communications delete-room <room-id>'},
     {name:'registrants',summary:'List people registered for a room',usage:'bb communications registrants <room-id>'},
     {name:'register',summary:'Register a person and issue their personal join link',usage:'bb communications register <room-id> <name> <email>'},
     {name:'status',summary:'Show source readiness',usage:'bb communications status'},
@@ -140,6 +143,7 @@ export default async function plugin(bb:BbPluginApi) {
         case 'create-room':if(a.length!==1)throw new Error(usage);result=await zoom.createRoom(a[0]!);break;
         case 'archive-room':if(a.length!==1)throw new Error(usage);result=hub.archiveRoom(a[0]!);break;
         case 'renew-room':if(a.length!==1)throw new Error(usage);result=await zoom.renewRoom(a[0]!);break;
+        case 'delete-room':if(a.length!==1)throw new Error(usage);result=await zoom.deleteRoom(a[0]!);break;
         case 'registrants':if(a.length!==1)throw new Error(usage);result=hub.listRegistrants(a[0]!);break;
         case 'register':if(a.length!==3)throw new Error(usage);result=await zoom.addRegistrant(a[0]!,{name:a[1]!,email:a[2]!});break;
         case 'status':if(a.length)throw new Error(usage);result=await sources();break;

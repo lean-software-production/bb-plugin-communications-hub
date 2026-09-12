@@ -23,6 +23,7 @@ export const rpcContract=defineRpcContract({
   'rooms.create':{input:z.object({name:z.string().trim().min(1).max(200)}).strict(),output:roomSchema},
   'rooms.archive':{input:z.object({roomId:id}).strict(),output:roomSchema},
   'rooms.renew':{input:z.object({roomId:id}).strict(),output:roomSchema},
+  'rooms.delete':{input:z.object({roomId:id}).strict(),output:roomSchema},
   'registrants.list':{input:z.object({roomId:id}).strict(),output:z.object({registrants:z.array(registrantSchema)})},
   'registrants.add':{input:z.object({roomId:id,name:z.string().trim().min(1).max(200),email:z.string().trim().min(3).max(320)}).strict(),output:registrantSchema},
   'capture.stop':{input:z.object({conversationId:id}).strict(),output:conversationSchema},

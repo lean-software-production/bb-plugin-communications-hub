@@ -26,6 +26,10 @@ export const migrations = [
     INSERT INTO segment_search(rowid,text) VALUES (new.rowid,new.text); END`,
   `CREATE TABLE IF NOT EXISTS attachments (
     threadId TEXT PRIMARY KEY, conversationId TEXT NOT NULL REFERENCES conversations(id), cursor INTEGER NOT NULL DEFAULT 0)`,
+  `CREATE TABLE IF NOT EXISTS rooms (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, sourceId TEXT NOT NULL, externalId TEXT NOT NULL,
+    joinUrl TEXT NOT NULL, hostUser TEXT NOT NULL, createdAt INTEGER NOT NULL, archivedAt INTEGER,
+    UNIQUE(sourceId, externalId))`,
   /**
    * Thread targets supersede `attachments`.
    *
@@ -35,10 +39,6 @@ export const migrations = [
    * old table is left untouched: nothing reads it, and dropping it would destroy the only
    * copy of cursor state if a load ever had to fall back.
    */
-  `CREATE TABLE IF NOT EXISTS rooms (
-    id TEXT PRIMARY KEY, name TEXT NOT NULL, sourceId TEXT NOT NULL, externalId TEXT NOT NULL,
-    joinUrl TEXT NOT NULL, hostUser TEXT NOT NULL, createdAt INTEGER NOT NULL, archivedAt INTEGER,
-    UNIQUE(sourceId, externalId))`,
   `CREATE TABLE IF NOT EXISTS thread_targets (
     threadId TEXT PRIMARY KEY, roomId TEXT REFERENCES rooms(id),
     conversationId TEXT REFERENCES conversations(id), cursor INTEGER NOT NULL DEFAULT 0,
@@ -75,6 +75,7 @@ export class Hub {
       ['segments','speakerId','TEXT'],
       ['conversations','roomId','TEXT'],
       ['rooms','expiresAt','INTEGER'],
+      ['rooms','sourceDeletedAt','INTEGER'],
     ];
     for (const [table,column,type] of additions) {
       const columns=this.db.prepare(`PRAGMA table_info(${table})`).all() as {name:string}[];
@@ -141,6 +142,19 @@ export class Hub {
   setRoomExpiry(roomId: string, expiresAt: number): Room {
     this.getRoom(roomId);
     this.db.prepare('UPDATE rooms SET expiresAt=? WHERE id=?').run(z.number().int().positive().parse(expiresAt),roomId);
+    this.changed(); return this.getRoom(roomId);
+  }
+  /**
+   * Record that a room's meeting no longer exists at the source.
+   *
+   * Archived too, because a room whose join URLs are dead should not be offered. The row and
+   * its registrants stay: conversations reference the room, and the registrant list is the
+   * record of who was given a link that has since been revoked.
+   */
+  markRoomDeleted(roomId: string): Room {
+    this.getRoom(roomId);
+    const now=Date.now();
+    this.db.prepare('UPDATE rooms SET sourceDeletedAt=coalesce(sourceDeletedAt,?),archivedAt=coalesce(archivedAt,?) WHERE id=?').run(now,now,roomId);
     this.changed(); return this.getRoom(roomId);
   }
   listRegistrants(roomId: string) {

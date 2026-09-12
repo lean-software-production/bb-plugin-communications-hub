@@ -399,6 +399,27 @@ describe('registrants', () => {
     expect(hub.listRegistrants(room.id).registrants).toHaveLength(1);
     expect(hub.getRoom(room.id).joinUrl).toBe(roomInput().joinUrl);
   });
+  it('retires a room whose meeting was deleted', () => {
+    const {hub}=setup(); const room=hub.createRoom(roomInput());
+    hub.createRegistrant(person(room.id));
+    const deleted=hub.markRoomDeleted(room.id);
+
+    expect(deleted.sourceDeletedAt).toBeGreaterThan(0);
+    // Archived too: a room whose join URLs are dead should not be offered.
+    expect(deleted.archivedAt).toBeGreaterThan(0);
+    expect(hub.listRooms().rooms).toEqual([]);
+    // The registrant list stays as the record of who was given a link that has been revoked.
+    expect(hub.listRegistrants(room.id).registrants).toHaveLength(1);
+  });
+  it('keeps past sittings readable after the meeting is deleted', () => {
+    const {hub}=setup(); const room=hub.createRoom(roomInput());
+    const past=hub.ensureConversation('zoom','occurrence','Team standup · earlier');
+    hub.setConversationRoom(past.id,room.id);
+    hub.markRoomDeleted(room.id);
+
+    expect(hub.getConversation(past.id).roomId).toBe(room.id);
+    expect(hub.getRoom(room.id).name).toBe('Team standup');
+  });
   it('records when a room stops working', () => {
     const {hub}=setup();
     const room=hub.createRoom({...roomInput(),expiresAt:1_900_000_000_000});

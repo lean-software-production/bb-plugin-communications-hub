@@ -66,6 +66,7 @@ Creating one usually needs account-owner or administrator rights.
    | `meeting:read:meeting:admin` | naming a capture after the Zoom topic |
    | `meeting:update:meeting:admin` | changing a room after it is created |
    | `meeting:write:registrant:admin` | issuing a personal join link |
+   | `meeting:delete:meeting:admin` | deleting a room at Zoom |
 
    Each is a separate failure: a missing scope returns 400 with the scope name in the message, and only when that particular call is made.
 5. **Activate your app.** Server-to-Server apps are activated rather than installed, and issue no tokens until they are.
@@ -119,7 +120,7 @@ A room is one reusable Zoom meeting that BB created and owns. Its join URL never
 
 Create one from the Communications page or with `bb communications create-room <name>`. Creating a meeting is deliberately not an agent tool: transcript text sits in an agent's context, so a sentence spoken in a meeting must never be able to spend money or send an invitation.
 
-Each room is a recurring meeting with a fixed time, sixty monthly occurrences. The scheduled times are nominal - people join whenever they like - so the recurrence is a lifespan rather than a schedule, and the room works for about five years. The UI warns once expiry is within sixty days. **Renew** restates the same meeting from today, so the meeting id, the join URL and every personal link already issued are unchanged - use `bb communications renew-room <room-id>` or the button on the room. Archiving is local: the Zoom meeting is left alone, so an old join URL keeps working and past conversations stay readable.
+Each room is a recurring meeting with a fixed time, sixty monthly occurrences. The scheduled times are nominal - people join whenever they like - so the recurrence is a lifespan rather than a schedule, and the room works for about five years. The UI warns once expiry is within sixty days. **Renew** restates the same meeting from today, so the meeting id, the join URL and every personal link already issued are unchanged - use `bb communications renew-room <room-id>` or the button on the room. Archiving is local: the Zoom meeting is left alone, so an old join URL keeps working and past conversations stay readable. **Delete at Zoom** is the stronger option and asks for confirmation first: it deletes the meeting, so the plain join URL and every personal link stop working at once. The room row and its registrant list are kept as the record of who held a link, and past sittings stay readable either way.
 
 Rooms have registration enabled, which is what lets BB choose the name a participant joins under. Register someone from the room's card or with `bb communications register <room-id> <name> <email>`. They get a personal join URL: whoever opens it joins under the registered name, signed in to Zoom or not, and it is valid for every occurrence. The plain room URL asks anyone else to register first, so there is no unnamed way in.
 

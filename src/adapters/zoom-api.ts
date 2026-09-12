@@ -83,8 +83,8 @@ function monthlyDay(nowMs: number): number {
  * Meeting settings a room depends on.
  *
  * `waiting_room` must be false. A waiting room overrides join before host, so guests would
- * queue for a host who never arrives — measured, not assumed. `approval_type: 2` disables
- * registration, which would otherwise gate the join URL behind a form.
+ * queue for a host who never arrives - measured, not assumed. Registration does not override
+ * it, which was measured too.
  *
  * Nothing here enables transcript capture. RTMS auto-start is a per-user Zoom Apps setting
  * belonging to the host, not a meeting field, so the host must be the account that installed
@@ -223,6 +223,17 @@ export class ZoomApi {
       },
     });
     return this.dependencies.now() + (MAX_OCCURRENCES - 1) * MONTH_MS;
+  }
+
+  /**
+   * Delete a meeting at Zoom.
+   *
+   * Irreversible, and it takes every personal link with it: the plain join URL and every
+   * registrant's `tk=` URL stop working at once. Only worth doing when a room should become
+   * unreachable, rather than merely retired - archiving alone leaves the meeting usable.
+   */
+  async deleteMeeting(meetingId: string): Promise<void> {
+    await this.call(`/meetings/${encodeURIComponent(meetingId)}`, { method: 'DELETE' });
   }
 
   /** Read a meeting's topic. RTMS events carry no topic, so naming a capture needs this call. */

@@ -80,6 +80,7 @@ const room: Room = {
   createdAt: 1_700_000_000_000,
   archivedAt: null,
   expiresAt: 1_855_000_000_000,
+  sourceDeletedAt: null,
 };
 
 const registrant: Registrant = {
@@ -100,6 +101,7 @@ function handlers(
     "rooms.create": ({ name }) => ({ ...room, id: "room-2", name }),
     "rooms.archive": () => ({ ...room, archivedAt: 1_700_000_100_000 }),
     "rooms.renew": () => ({ ...room, expiresAt: 1_960_000_000_000 }),
+    "rooms.delete": () => ({ ...room, archivedAt: 1_700_000_200_000, sourceDeletedAt: 1_700_000_200_000 }),
     "registrants.list": () => ({ registrants: [registrant] }),
     "registrants.add": ({ name, email }) => ({ ...registrant, id: "registrant-2", name, email }),
     "conversations.list": () => ({

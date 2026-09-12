@@ -32,7 +32,7 @@ class RecordingSink implements TranscriptSink {
   }
 
   createRoom(input: { name: string; sourceId: string; externalId: string; joinUrl: string; hostUser: string; expiresAt?: number | null }): Room {
-    const room: Room = { id: `room-${input.externalId}`, createdAt: 0, archivedAt: null, expiresAt: null, ...input };
+    const room: Room = { id: `room-${input.externalId}`, createdAt: 0, archivedAt: null, expiresAt: null, sourceDeletedAt: null, ...input };
     this.rooms.push(room);
     return room;
   }
@@ -40,6 +40,13 @@ class RecordingSink implements TranscriptSink {
   setRoomExpiry(roomId: string, expiresAt: number): Room {
     const room = this.getRoom(roomId);
     room.expiresAt = expiresAt;
+    return room;
+  }
+
+  markRoomDeleted(roomId: string): Room {
+    const room = this.getRoom(roomId);
+    room.sourceDeletedAt = 1;
+    room.archivedAt = 1;
     return room;
   }
 

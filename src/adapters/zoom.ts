@@ -88,6 +88,14 @@ export interface ZoomController {
   addRegistrant(roomId: string, person: {name: string; email: string}): Promise<Registrant>;
   /** Push a room's expiry out, keeping its meeting id, join URL and personal links. */
   renewRoom(roomId: string): Promise<Room>;
+  /**
+   * Delete a room's meeting at Zoom and retire the room.
+   *
+   * Separate from archiving, which is local and leaves the meeting working. This makes the room
+   * unreachable for everyone holding a link, so like room creation it stays a UI action and a
+   * CLI command and is never an agent tool.
+   */
+  deleteRoom(roomId: string): Promise<Room>;
 }
 
 export interface ZoomAdapterDependencies {
@@ -523,6 +531,15 @@ export function registerZoomWithDependencies(
         roomId: room.id, name, email,
         externalId: issued.registrantId, joinUrl: issued.joinUrl,
       });
+    },
+    async deleteRoom(roomId: string) {
+      const room = sink.getRoom(roomId);
+      const api = await restClient();
+      if (!api) throw new Error("Deleting a room needs the Server-to-Server credential in plugin settings.");
+      await api.deleteMeeting(room.externalId);
+      // Recorded only after Zoom confirms, so the hub never claims a meeting is gone while it
+      // is still reachable. Conversations keep their roomId, so past sittings stay readable.
+      return sink.markRoomDeleted(room.id);
     },
     async renewRoom(roomId: string) {
       const room = sink.getRoom(roomId);
