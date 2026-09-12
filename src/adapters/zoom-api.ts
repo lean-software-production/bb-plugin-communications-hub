@@ -154,6 +154,8 @@ export class ZoomApi {
       throw new Error('Zoom rejected the access token. Check the Server-to-Server OAuth credential.');
     }
     if (!response.ok) throw new Error(`Zoom API request failed (${response.status})`);
+    // Zoom answers a successful PATCH or DELETE with 204 and no body.
+    if (response.status === 204) return null;
     return response.json();
   }
 
@@ -201,6 +203,26 @@ export class ZoomApi {
       { method: 'POST', body: { email: person.email, first_name: person.firstName, last_name: person.lastName } },
     ));
     return { registrantId: parsed.registrant_id, joinUrl: parsed.join_url };
+  }
+
+  /**
+   * Push a room's recurrence out to a fresh sixty occurrences.
+   *
+   * The recurrence is a lifespan rather than a schedule, so renewal is simply restating it from
+   * today. The meeting id and join URL are unchanged, which is the point: every personal link
+   * already issued keeps working.
+   */
+  async renewRoomMeeting(meetingId: string): Promise<number> {
+    const startTime = new Date(this.dependencies.now()).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    await this.call(`/meetings/${encodeURIComponent(meetingId)}`, {
+      method: 'PATCH',
+      body: {
+        start_time: startTime,
+        duration: 60,
+        recurrence: { type: MONTHLY, repeat_interval: 1, monthly_day: monthlyDay(this.dependencies.now()), end_times: MAX_OCCURRENCES },
+      },
+    });
+    return this.dependencies.now() + (MAX_OCCURRENCES - 1) * MONTH_MS;
   }
 
   /** Read a meeting's topic. RTMS events carry no topic, so naming a capture needs this call. */

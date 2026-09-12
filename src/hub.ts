@@ -137,6 +137,12 @@ export class Hub {
       .run(id,parsed.roomId,parsed.name,parsed.email,parsed.externalId,parsed.joinUrl,Date.now());
     this.changed(); return this.db.prepare('SELECT * FROM registrants WHERE id=?').get(id) as Registrant;
   }
+  /** Record a renewed lifespan. The Zoom meeting is unchanged, so links already issued still work. */
+  setRoomExpiry(roomId: string, expiresAt: number): Room {
+    this.getRoom(roomId);
+    this.db.prepare('UPDATE rooms SET expiresAt=? WHERE id=?').run(z.number().int().positive().parse(expiresAt),roomId);
+    this.changed(); return this.getRoom(roomId);
+  }
   listRegistrants(roomId: string) {
     idSchema.parse(roomId);
     return {registrants:this.db.prepare('SELECT * FROM registrants WHERE roomId=? ORDER BY createdAt,id').all(roomId) as Registrant[]};

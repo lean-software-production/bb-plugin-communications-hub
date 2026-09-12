@@ -86,6 +86,8 @@ export interface ZoomController {
    * never be able to reach it.
    */
   addRegistrant(roomId: string, person: {name: string; email: string}): Promise<Registrant>;
+  /** Push a room's expiry out, keeping its meeting id, join URL and personal links. */
+  renewRoom(roomId: string): Promise<Room>;
 }
 
 export interface ZoomAdapterDependencies {
@@ -521,6 +523,13 @@ export function registerZoomWithDependencies(
         roomId: room.id, name, email,
         externalId: issued.registrantId, joinUrl: issued.joinUrl,
       });
+    },
+    async renewRoom(roomId: string) {
+      const room = sink.getRoom(roomId);
+      const api = await restClient();
+      if (!api) throw new Error("Renewing a room needs the Server-to-Server credential in plugin settings.");
+      const expiresAt = await api.renewRoomMeeting(room.externalId);
+      return sink.setRoomExpiry(room.id, expiresAt);
     },
     async createRoom(name: string) {
       const current = await settings.get();

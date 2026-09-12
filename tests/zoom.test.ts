@@ -37,6 +37,12 @@ class RecordingSink implements TranscriptSink {
     return room;
   }
 
+  setRoomExpiry(roomId: string, expiresAt: number): Room {
+    const room = this.getRoom(roomId);
+    room.expiresAt = expiresAt;
+    return room;
+  }
+
   getRoom(roomId: string): Room {
     const room = this.rooms.find((item) => item.id === roomId);
     if (!room) throw new Error("Room not found");

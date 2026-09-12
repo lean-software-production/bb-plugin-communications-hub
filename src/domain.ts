@@ -69,6 +69,7 @@ export interface TranscriptSink {
   findRoom(sourceId: string, externalId: string): Room | null;
   getRoom(roomId: string): Room;
   createRegistrant(input: {roomId: string; name: string; email: string; externalId: string; joinUrl: string}): Registrant;
+  setRoomExpiry(roomId: string, expiresAt: number): Room;
   createRoom(input: {name: string; sourceId: string; externalId: string; joinUrl: string; hostUser: string; expiresAt?: number | null}): Room;
   setConversationRoom(conversationId: string, roomId: string): unknown;
   /** Replace a generated title, but only while it is still the generated one. */

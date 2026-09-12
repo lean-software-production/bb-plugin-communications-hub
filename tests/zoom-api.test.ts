@@ -168,6 +168,28 @@ describe("registrants", () => {
       .rejects.toThrow(/400/);
   });
 
+  it("renews a room without changing its meeting or links", async () => {
+    const now = Date.UTC(2027, 0, 15);
+    const { calls, dependencies } = stub([new Response(null, { status: 204 })], { now: () => now });
+
+    const expiresAt = await new ZoomApi(credentials, dependencies).renewRoomMeeting("88800011122");
+
+    const request = calls.at(-1)!;
+    expect(request.init?.method).toBe("PATCH");
+    // The same meeting is restated, never replaced, so every personal link already issued
+    // keeps working. A new meeting would silently invalidate them.
+    expect(request.url).toBe("https://api.zoom.us/v2/meetings/88800011122");
+    const body = JSON.parse(String(request.init?.body));
+    expect(body.recurrence).toMatchObject({ type: 3, repeat_interval: 1, end_times: 60 });
+    expect(expiresAt).toBeGreaterThan(now);
+  });
+
+  it("accepts an empty body from a successful update", async () => {
+    // Zoom answers PATCH with 204 and no content, which is not parseable as JSON.
+    const { dependencies } = stub([new Response(null, { status: 204 })]);
+    await expect(new ZoomApi(credentials, dependencies).renewRoomMeeting("1")).resolves.toBeGreaterThan(0);
+  });
+
   it("dates a room's expiry from its recurrence", async () => {
     const now = Date.UTC(2026, 8, 12);
     const { dependencies } = stub([jsonResponse(meeting)], { now: () => now });

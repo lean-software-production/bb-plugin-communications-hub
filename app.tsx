@@ -577,6 +577,10 @@ function Rooms() {
                   try { await navigator.clipboard.writeText(room.joinUrl); setCopied(room.id); }
                   catch (cause) { setError(errorText(cause)); }
                 }}>{copied === room.id ? "Copied" : "Copy join link"}</Button>
+                <Button type="button" size="sm" variant="outline" onClick={async () => {
+                  try { await rpc.call("rooms.renew", { roomId: room.id }); setError(null); refetch(); }
+                  catch (cause) { setError(errorText(cause)); }
+                }}>Renew</Button>
                 <Button type="button" size="sm" variant="ghost" onClick={async () => {
                   try { await rpc.call("rooms.archive", { roomId: room.id }); setError(null); refetch(); }
                   catch (cause) { setError(errorText(cause)); }

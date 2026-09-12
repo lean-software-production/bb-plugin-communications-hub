@@ -99,6 +99,7 @@ function handlers(
     "rooms.list": () => ({ rooms: [room] }),
     "rooms.create": ({ name }) => ({ ...room, id: "room-2", name }),
     "rooms.archive": () => ({ ...room, archivedAt: 1_700_000_100_000 }),
+    "rooms.renew": () => ({ ...room, expiresAt: 1_960_000_000_000 }),
     "registrants.list": () => ({ registrants: [registrant] }),
     "registrants.add": ({ name, email }) => ({ ...registrant, id: "registrant-2", name, email }),
     "conversations.list": () => ({

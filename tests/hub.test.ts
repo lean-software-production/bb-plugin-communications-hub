@@ -389,6 +389,16 @@ describe('registrants', () => {
     const {hub}=setup();
     expect(()=>hub.createRegistrant(person('missing'))).toThrow('Room not found');
   });
+  it('records a renewed lifespan', () => {
+    const {hub}=setup(); const room=hub.createRoom({...roomInput(),expiresAt:1_800_000_000_000});
+    hub.createRegistrant(person(room.id));
+    const renewed=hub.setRoomExpiry(room.id,1_960_000_000_000);
+
+    expect(renewed.expiresAt).toBe(1_960_000_000_000);
+    // Renewal restates the same Zoom meeting, so the links already issued are untouched.
+    expect(hub.listRegistrants(room.id).registrants).toHaveLength(1);
+    expect(hub.getRoom(room.id).joinUrl).toBe(roomInput().joinUrl);
+  });
   it('records when a room stops working', () => {
     const {hub}=setup();
     const room=hub.createRoom({...roomInput(),expiresAt:1_900_000_000_000});
