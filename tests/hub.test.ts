@@ -12,7 +12,7 @@ describe('persistent conversation library', () => {
     const {db,hub} = setup(); const m=hub.ensureConversation('import','one','Planning');
     hub.appendSegments(m.id,[segment('a')]); hub.attach('thread-a',m.id);
     const before=hub.readTranscript(m.id,{}); const reopened=new Hub(db);
-    expect(reopened.getAttachment('thread-a')).toEqual({threadId:'thread-a',conversationId:m.id,cursor:0});
+    expect(reopened.getAttachment('thread-a')).toEqual({threadId:'thread-a',roomId:null,conversationId:m.id,cursor:0});
     expect(reopened.readTranscript(m.id,{}).segments).toEqual(before.segments);
     expect(reopened.ensureConversation('import','one','New title').id).toBe(m.id);
   });
@@ -97,6 +97,26 @@ describe('capture window accounting', () => {
 });
 
 describe('schema upgrades', () => {
+  it('carries existing attachments into the table that supersedes them', () => {
+    // conversationId was NOT NULL, which a room target with no sitting cannot satisfy, and the
+    // recorded migration cannot be edited. A thread attached before the upgrade must keep its
+    // conversation and its cursor across the move.
+    const db = new Database(':memory:'); databases.push(db);
+    db.exec(`CREATE TABLE conversations (
+      id TEXT PRIMARY KEY, sourceId TEXT NOT NULL, externalId TEXT NOT NULL, title TEXT NOT NULL,
+      createdAt INTEGER NOT NULL, captureStartedAt INTEGER, lastReceivedAt INTEGER,
+      captureState TEXT NOT NULL DEFAULT 'idle', captureDetail TEXT, interruptionCount INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(sourceId, externalId))`);
+    db.exec(`CREATE TABLE attachments (
+      threadId TEXT PRIMARY KEY, conversationId TEXT NOT NULL REFERENCES conversations(id), cursor INTEGER NOT NULL DEFAULT 0)`);
+    db.prepare('INSERT INTO conversations(id,sourceId,externalId,title,createdAt) VALUES(?,?,?,?,?)')
+      .run('old','zoom','occurrence','Earlier meeting',1);
+    db.prepare('INSERT INTO attachments(threadId,conversationId,cursor) VALUES(?,?,?)').run('thread-a','old',4);
+
+    const hub=new Hub(db);
+
+    expect(hub.getAttachment('thread-a')).toEqual({threadId:'thread-a',roomId:null,conversationId:'old',cursor:4});
+  });
   it('adds new columns to a database created before they existed, keeping stored passages', () => {
     // SQLite has no ADD COLUMN IF NOT EXISTS and CREATE TABLE IF NOT EXISTS is a no-op on
     // an existing database, so this is the path a real installation takes on upgrade.
@@ -238,5 +258,100 @@ describe('late automatic naming', () => {
     const {hub}=setup(); const m=hub.ensureConversation('zoom','occurrence','Zoom meeting 999');
     expect(()=>hub.renameIfUnchanged(m.id,'Zoom meeting 999','   ')).toThrow();
     expect(hub.getConversation(m.id).title).toBe('Zoom meeting 999');
+  });
+});
+
+describe('threads that follow a room', () => {
+  const roomInput = () => ({
+    name:'Team standup', sourceId:'zoom', externalId:'84680215093',
+    joinUrl:'https://zoom.us/j/84680215093', hostUser:'operator@example.com',
+  });
+  const sitting = (hub: Hub, roomId: string, externalId: string) => {
+    const c=hub.ensureConversation('zoom',externalId,`Team standup · ${externalId}`);
+    hub.setConversationRoom(c.id,roomId); return c;
+  };
+
+  it('attaches to a room nobody has met in yet', () => {
+    // A team attaches the thread when the room is made, not when someone first speaks.
+    const {hub}=setup(); const room=hub.createRoom(roomInput());
+    const attachment=hub.attachRoom('thread-a',room.id);
+    expect(attachment).toEqual({threadId:'thread-a',roomId:room.id,conversationId:null,cursor:0});
+  });
+  it('resolves to the room’s latest sitting when attached', () => {
+    const {hub}=setup(); const room=hub.createRoom(roomInput());
+    sitting(hub,room.id,'occurrence-1'); const second=sitting(hub,room.id,'occurrence-2');
+    expect(hub.attachRoom('thread-a',room.id).conversationId).toBe(second.id);
+  });
+  it('follows the room into a new sitting instead of going stale', () => {
+    // This is the failure the room concept exists to fix: a thread attached to one sitting
+    // stopped receiving anything the moment the room emptied and refilled, silently.
+    const {hub}=setup(); const room=hub.createRoom(roomInput());
+    const first=sitting(hub,room.id,'occurrence-1');
+    hub.attachRoom('thread-a',room.id);
+    expect(hub.getAttachment('thread-a')!.conversationId).toBe(first.id);
+
+    const second=sitting(hub,room.id,'occurrence-2');
+    expect(hub.getAttachment('thread-a')!.conversationId).toBe(second.id);
+  });
+  it('resets the cursor when it follows, because sequences restart per sitting', () => {
+    const {hub}=setup(); const room=hub.createRoom(roomInput());
+    const first=sitting(hub,room.id,'occurrence-1');
+    hub.appendSegments(first.id,[segment('a'),segment('b')]);
+    hub.attachRoom('thread-a',room.id); hub.acknowledge('thread-a',first.id,2);
+    expect(hub.getAttachment('thread-a')!.cursor).toBe(2);
+
+    sitting(hub,room.id,'occurrence-2');
+    // Carrying cursor 2 across would mark the new sitting's opening as already read.
+    expect(hub.getAttachment('thread-a')!.cursor).toBe(0);
+  });
+  it('leaves a thread attached to one sitting where it is', () => {
+    // Attaching to a conversation is still a way of saying "this meeting, not the room".
+    const {hub}=setup(); const room=hub.createRoom(roomInput());
+    const first=sitting(hub,room.id,'occurrence-1');
+    hub.attach('thread-a',first.id);
+
+    sitting(hub,room.id,'occurrence-2');
+    expect(hub.getAttachment('thread-a')).toEqual({threadId:'thread-a',roomId:null,conversationId:first.id,cursor:0});
+  });
+  it('does not disturb threads following a different room', () => {
+    const {hub}=setup();
+    const room=hub.createRoom(roomInput());
+    const other=hub.createRoom({...roomInput(),externalId:'99900022233',name:'Vendor sync'});
+    const mine=sitting(hub,room.id,'occurrence-1');
+    hub.attachRoom('thread-a',room.id);
+
+    sitting(hub,other.id,'occurrence-2');
+    expect(hub.getAttachment('thread-a')!.conversationId).toBe(mine.id);
+  });
+  it('keeps the cursor when re-attaching to the same room', () => {
+    const {hub}=setup(); const room=hub.createRoom(roomInput());
+    const first=sitting(hub,room.id,'occurrence-1');
+    hub.appendSegments(first.id,[segment('a')]);
+    hub.attachRoom('thread-a',room.id); hub.acknowledge('thread-a',first.id,1);
+
+    expect(hub.attachRoom('thread-a',room.id).cursor).toBe(1);
+  });
+  it('switching a thread from a room to a conversation clears the room', () => {
+    const {hub}=setup(); const room=hub.createRoom(roomInput());
+    const first=sitting(hub,room.id,'occurrence-1');
+    hub.attachRoom('thread-a',room.id);
+    expect(hub.attach('thread-a',first.id).roomId).toBeNull();
+
+    sitting(hub,room.id,'occurrence-2');
+    expect(hub.getAttachment('thread-a')!.conversationId).toBe(first.id);
+  });
+  it('detaches a room target', () => {
+    const {hub}=setup(); const room=hub.createRoom(roomInput());
+    hub.attachRoom('thread-a',room.id); hub.detach('thread-a');
+    expect(hub.getAttachment('thread-a')).toBeNull();
+  });
+  it('rejects attaching to a room that does not exist', () => {
+    const {hub}=setup();
+    expect(()=>hub.attachRoom('thread-a','missing')).toThrow('Room not found');
+  });
+  it('survives a hub reconstruction', () => {
+    const {db,hub}=setup(); const room=hub.createRoom(roomInput());
+    hub.attachRoom('thread-a',room.id);
+    expect(new Hub(db).getAttachment('thread-a')!.roomId).toBe(room.id);
   });
 });

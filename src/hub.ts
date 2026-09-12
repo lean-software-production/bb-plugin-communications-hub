@@ -26,10 +26,25 @@ export const migrations = [
     INSERT INTO segment_search(rowid,text) VALUES (new.rowid,new.text); END`,
   `CREATE TABLE IF NOT EXISTS attachments (
     threadId TEXT PRIMARY KEY, conversationId TEXT NOT NULL REFERENCES conversations(id), cursor INTEGER NOT NULL DEFAULT 0)`,
+  /**
+   * Thread targets supersede `attachments`.
+   *
+   * A thread must be able to point at a room that has no sitting yet, and the original table
+   * declares conversationId NOT NULL. SQLite cannot relax that in place, and the recorded
+   * migration cannot be edited, so a new table is created and the existing rows copied. The
+   * old table is left untouched: nothing reads it, and dropping it would destroy the only
+   * copy of cursor state if a load ever had to fall back.
+   */
   `CREATE TABLE IF NOT EXISTS rooms (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, sourceId TEXT NOT NULL, externalId TEXT NOT NULL,
     joinUrl TEXT NOT NULL, hostUser TEXT NOT NULL, createdAt INTEGER NOT NULL, archivedAt INTEGER,
     UNIQUE(sourceId, externalId))`,
+  `CREATE TABLE IF NOT EXISTS thread_targets (
+    threadId TEXT PRIMARY KEY, roomId TEXT REFERENCES rooms(id),
+    conversationId TEXT REFERENCES conversations(id), cursor INTEGER NOT NULL DEFAULT 0,
+    CHECK (roomId IS NOT NULL OR conversationId IS NOT NULL))`,
+  `INSERT OR IGNORE INTO thread_targets(threadId,conversationId,cursor)
+    SELECT threadId,conversationId,cursor FROM attachments`,
 ];
 
 /** SQLite owns runtime state. No platform or BB-thread API dependencies. */
@@ -141,7 +156,14 @@ export class Hub {
   /** Link a capture to the room it happened in. Idempotent: a reconnect re-links the same room. */
   setConversationRoom(conversationId: string, roomId: string): Conversation {
     this.getConversation(conversationId); this.getRoom(roomId);
-    this.db.prepare('UPDATE conversations SET roomId=? WHERE id=?').run(roomId,conversationId);
+    this.db.transaction(()=>{
+      this.db.prepare('UPDATE conversations SET roomId=? WHERE id=?').run(roomId,conversationId);
+      // Threads following this room move to the new sitting. The cursor resets because
+      // sequences restart per conversation, so carrying it over would mark the opening of the
+      // new sitting as already read.
+      this.db.prepare('UPDATE thread_targets SET conversationId=?,cursor=0 WHERE roomId=? AND conversationId IS NOT ?')
+        .run(conversationId,roomId,conversationId);
+    })();
     this.changed(); return this.getConversation(conversationId);
   }
   getConversation(id: string): Conversation {
@@ -192,21 +214,46 @@ export class Hub {
   interruptActiveCaptures() {
     this.db.prepare("UPDATE conversations SET interruptionCount=interruptionCount+1,captureState='interrupted',captureDetail='Capture interrupted by plugin restart; earlier passages remain available.' WHERE captureState IN ('connecting','capturing','paused')").run();
   }
+  /** Point a thread at one conversation. The cursor survives re-attaching to the same one. */
   attach(threadId:string,conversationId:string):ThreadAttachment {
     idSchema.parse(threadId); this.getConversation(conversationId);
-    this.db.prepare(`INSERT INTO attachments(threadId,conversationId,cursor) VALUES(?,?,0)
-      ON CONFLICT(threadId) DO UPDATE SET conversationId=excluded.conversationId,
-      cursor=CASE WHEN attachments.conversationId=excluded.conversationId THEN attachments.cursor ELSE 0 END`).run(threadId,conversationId);
+    this.db.prepare(`INSERT INTO thread_targets(threadId,roomId,conversationId,cursor) VALUES(?,NULL,?,0)
+      ON CONFLICT(threadId) DO UPDATE SET roomId=NULL,conversationId=excluded.conversationId,
+      cursor=CASE WHEN thread_targets.conversationId=excluded.conversationId THEN thread_targets.cursor ELSE 0 END`).run(threadId,conversationId);
     this.changed(); return this.getAttachment(threadId)!;
   }
-  detach(threadId:string) { idSchema.parse(threadId); this.db.prepare('DELETE FROM attachments WHERE threadId=?').run(threadId); this.changed(); }
-  getAttachment(threadId:string):ThreadAttachment|null { idSchema.parse(threadId); return this.db.prepare('SELECT * FROM attachments WHERE threadId=?').get(threadId) as ThreadAttachment|undefined ?? null; }
+  /**
+   * Point a thread at a room rather than one sitting in it.
+   *
+   * A room fragments into a conversation per occupancy period, so a thread attached to one
+   * sitting goes stale the moment the room empties and refills - silently, which is the worst
+   * way for it to happen. A room target follows, resolving to whichever sitting is current.
+   *
+   * Attaching to a room with no sitting yet is normal: a team attaches the thread when the
+   * room is made, not when someone first speaks.
+   */
+  attachRoom(threadId:string,roomId:string):ThreadAttachment {
+    idSchema.parse(threadId); this.getRoom(roomId);
+    const current=this.currentRoomConversation(roomId);
+    this.db.prepare(`INSERT INTO thread_targets(threadId,roomId,conversationId,cursor) VALUES(?,?,?,0)
+      ON CONFLICT(threadId) DO UPDATE SET roomId=excluded.roomId,conversationId=excluded.conversationId,
+      cursor=CASE WHEN thread_targets.conversationId IS excluded.conversationId THEN thread_targets.cursor ELSE 0 END`)
+      .run(threadId,roomId,current);
+    this.changed(); return this.getAttachment(threadId)!;
+  }
+  /** The room's most recent sitting, or null before anyone has met in it. */
+  private currentRoomConversation(roomId:string):string|null {
+    const row=this.db.prepare('SELECT id FROM conversations WHERE roomId=? ORDER BY createdAt DESC,id LIMIT 1').get(roomId) as {id:string}|undefined;
+    return row?.id ?? null;
+  }
+  detach(threadId:string) { idSchema.parse(threadId); this.db.prepare('DELETE FROM thread_targets WHERE threadId=?').run(threadId); this.changed(); }
+  getAttachment(threadId:string):ThreadAttachment|null { idSchema.parse(threadId); return this.db.prepare('SELECT * FROM thread_targets WHERE threadId=?').get(threadId) as ThreadAttachment|undefined ?? null; }
   acknowledge(threadId:string,conversationId:string,cursor:number) {
     z.number().int().nonnegative().parse(cursor); const a=this.getAttachment(threadId);
     if (!a || a.conversationId!==conversationId) throw new Error('Conversation is not attached to this thread');
     const max=(this.db.prepare('SELECT coalesce(max(sequence),0) AS n FROM segments WHERE conversationId=?').get(conversationId) as {n:number}).n;
     if (cursor>max) throw new Error('Cursor exceeds available transcript');
-    this.db.prepare('UPDATE attachments SET cursor=max(cursor,?) WHERE threadId=?').run(cursor,threadId); this.changed(); return this.getAttachment(threadId)!;
+    this.db.prepare('UPDATE thread_targets SET cursor=max(cursor,?) WHERE threadId=?').run(cursor,threadId); this.changed(); return this.getAttachment(threadId)!;
   }
   readTranscript(conversationId:string,options:ReadOptions = {}):TranscriptPage { return this.queryTranscript(conversationId,options); }
   searchTranscript(conversationId:string,options:ReadOptions & {query:string}):TranscriptPage {

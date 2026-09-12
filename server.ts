@@ -12,6 +12,7 @@ const usage=`bb communications commands (JSON output):
   list [offset]
   current [thread-id]
   attach <conversation-id> [thread-id]
+  attach-room <room-id> [thread-id]
   detach [thread-id]
   import <title> <vtt|srt|txt> <text>
   read <conversation-id> [after-sequence] [limit]
@@ -35,13 +36,24 @@ export default async function plugin(bb:BbPluginApi) {
   hub.interruptActiveCaptures();
   const zoom=await registerZoom(bb,hub);
   const sources=async()=>({zoom:await zoom.status(),importReady:true,webhookPath:`/api/v1/plugins/${bb.pluginId}/http/zoom/webhook`});
-  const current=(threadId:string)=>{const attachment=hub.getAttachment(threadId);return {attachment,conversation:attachment?hub.getConversation(attachment.conversationId):null};};
+  const current=(threadId:string)=>{
+    const attachment=hub.getAttachment(threadId);
+    return {
+      attachment,
+      conversation:attachment?.conversationId?hub.getConversation(attachment.conversationId):null,
+      room:attachment?.roomId?hub.getRoom(attachment.roomId):null,
+    };
+  };
   const resolve=(threadId:string,conversationId?:string)=>{
     if(conversationId) return hub.getConversation(conversationId).id;
     const a=hub.getAttachment(threadId); if(!a) throw new Error('No conversation attached. Open the Conversation thread panel or use bb communications attach <conversation-id>.');
+    // A room target with no sitting is a thread waiting for its first meeting, not an error
+    // in the thread's setup, so it says which room it is waiting on.
+    if(!a.conversationId) throw new Error('This room has no conversation yet. Nobody has met in it since it was created.');
     return a.conversationId;
   };
   const attach=async(threadId:string,conversationId:string)=>{await bb.sdk.threads.get({threadId});return hub.attach(threadId,conversationId);};
+  const attachRoom=async(threadId:string,roomId:string)=>{await bb.sdk.threads.get({threadId});return hub.attachRoom(threadId,roomId);};
   const importTranscript=(raw:unknown)=>{const i=importInput.parse(raw);return hub.importConversation(i.title,parseTranscript(i.text,i.format));};
   const citationBase=(page:TranscriptPage)=>`${(bb.server.experimental_appUrl ?? bb.server.loopbackBaseUrl).replace(/\/$/,'')}/plugins/${bb.pluginId}/communications/${page.conversation.id}/`;
   const readPayload=(page:TranscriptPage)=>buildReadPayload(page,citationBase(page));
@@ -55,6 +67,7 @@ export default async function plugin(bb:BbPluginApi) {
     'transcripts.search':({conversationId,...options})=>hub.searchTranscript(conversationId,options),
     'attachments.get':({threadId})=>current(threadId),
     'attachments.set':({threadId,conversationId})=>attach(threadId,conversationId),
+    'attachments.setRoom':({threadId,roomId})=>attachRoom(threadId,roomId),
     'attachments.detach':({threadId})=>{hub.detach(threadId);return {ok:true};},
     'attachments.acknowledge':({threadId,conversationId,cursor})=>hub.acknowledge(threadId,conversationId,cursor),
     'rooms.list':({includeArchived})=>hub.listRooms({includeArchived}),
@@ -86,6 +99,7 @@ export default async function plugin(bb:BbPluginApi) {
     {name:'list',summary:'List stored conversations',usage:'bb communications list [offset]'},
     {name:'current',summary:'Get current thread conversation',usage:'bb communications current [thread-id]'},
     {name:'attach',summary:'Attach a thread to a conversation',usage:'bb communications attach <conversation-id> [thread-id]'},
+    {name:'attach-room',summary:'Attach a thread to a room so it follows each new sitting',usage:'bb communications attach-room <room-id> [thread-id]'},
     {name:'detach',summary:'Detach a thread without stopping capture',usage:'bb communications detach [thread-id]'},
     {name:'import',summary:'Import transcript text',usage:'bb communications import <title> <vtt|srt|txt> <text>'},
     {name:'read',summary:'Read a transcript page',usage:'bb communications read <conversation-id> [after-sequence] [limit]'},
@@ -106,6 +120,7 @@ export default async function plugin(bb:BbPluginApi) {
         case 'list':if(a.length>1)throw new Error(usage);result=hub.listConversations({offset:a[0]===undefined?0:Number(a[0])});break;
         case 'current':if(a.length>1)throw new Error(usage);result=current(thread(a[0]));break;
         case 'attach':if(a.length<1||a.length>2)throw new Error(usage);result=await attach(thread(a[1]),a[0]);break;
+        case 'attach-room':if(a.length<1||a.length>2)throw new Error(usage);result=await attachRoom(thread(a[1]),a[0]!);break;
         case 'detach':if(a.length>1)throw new Error(usage);hub.detach(thread(a[0]));result={ok:true};break;
         case 'import':if(a.length!==3)throw new Error(usage);result=importTranscript({title:a[0],format:a[1],text:a[2]});break;
         case 'read':if(a.length<1||a.length>3)throw new Error(usage);result=readPayload(hub.readTranscript(a[0],{after:a[1]===undefined?0:Number(a[1]),limit:a[2]===undefined?20:Number(a[2])}));break;

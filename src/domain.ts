@@ -38,7 +38,14 @@ export const segmentSchema = z.object({
   speaker: z.string().nullable(), speakerId: z.string().nullable(), text: z.string(), startMs: z.number().nullable(), endMs: z.number().nullable(), receivedAt: z.number(),
 });
 export type TranscriptSegment = z.infer<typeof segmentSchema>;
-export const attachmentSchema = z.object({threadId: z.string(), conversationId: z.string(), cursor: z.number()});
+export const attachmentSchema = z.object({
+  threadId: z.string(),
+  /** Set when the thread follows a room rather than one sitting in it. */
+  roomId: z.string().nullable(),
+  /** The sitting currently being read. Null only for a room nobody has met in yet. */
+  conversationId: z.string().nullable(),
+  cursor: z.number(),
+});
 export type ThreadAttachment = z.infer<typeof attachmentSchema>;
 /** Source adapters depend on this interface, not BB threads or the concrete hub. */
 export interface TranscriptSink {

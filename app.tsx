@@ -591,17 +591,26 @@ function ThreadConversationPanel({ threadId }: PluginThreadPanelProps) {
   const [attachment, setAttachment] = useState<ThreadAttachment | null>(null);
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [rooms, setRooms] = useState<Room[]>([]);
+  const [room, setRoom] = useState<Room | null>(null);
+  // One picker for two kinds of target, so the value carries which kind it is.
   const [selected, setSelected] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refetch = useCallback(async () => {
     try {
-      const [attached, listed] = await Promise.all([
+      const [attached, listed, listedRooms] = await Promise.all([
         rpc.call("attachments.get", { threadId }),
         rpc.call("conversations.list", { offset: 0, limit: 100 }),
+        rpc.call("rooms.list", {}),
       ]);
-      setAttachment(attached.attachment); setConversation(attached.conversation); setConversations(listed.conversations);
-      setSelected((value) => value || attached.conversation?.id || listed.conversations[0]?.id || "");
+      setAttachment(attached.attachment); setConversation(attached.conversation);
+      setRoom(attached.room); setConversations(listed.conversations); setRooms(listedRooms.rooms);
+      setSelected((value) => value
+        || (attached.room ? `room:${attached.room.id}` : "")
+        || (attached.conversation ? `conversation:${attached.conversation.id}` : "")
+        || (listedRooms.rooms[0] ? `room:${listedRooms.rooms[0].id}` : "")
+        || (listed.conversations[0] ? `conversation:${listed.conversations[0].id}` : ""));
       setError(null);
     } catch (cause) { setError(errorText(cause)); }
   }, [rpc, threadId]);
@@ -611,34 +620,49 @@ function ThreadConversationPanel({ threadId }: PluginThreadPanelProps) {
 
   const attach = async () => {
     if (!selected) return;
+    const [kind, id] = [selected.slice(0, selected.indexOf(":")), selected.slice(selected.indexOf(":") + 1)];
     setPending(true);
     try {
-      const next = await rpc.call("attachments.set", { threadId, conversationId: selected });
+      const next = kind === "room"
+        ? await rpc.call("attachments.setRoom", { threadId, roomId: id })
+        : await rpc.call("attachments.set", { threadId, conversationId: id });
       setAttachment(next);
-      setConversation(conversations.find(({ id }) => id === selected) ?? await rpc.call("conversations.get", { conversationId: selected }));
+      setRoom(kind === "room" ? rooms.find((item) => item.id === id) ?? null : null);
+      setConversation(next.conversationId === null
+        ? null
+        : conversations.find((item) => item.id === next.conversationId)
+          ?? await rpc.call("conversations.get", { conversationId: next.conversationId }));
       setError(null);
     } catch (cause) { setError(errorText(cause)); }
     finally { setPending(false); }
   };
 
   return <div className="h-full min-h-0 overflow-y-auto p-4"><div className="space-y-4">
-    <label className="block space-y-1 text-sm"><span>Choose conversation</span>
-      <select aria-label="Choose conversation" className="block h-9 w-full rounded-md border border-input bg-background px-3 text-sm" value={selected} onChange={(event) => setSelected(event.target.value)}>
-        {!conversations.length ? <option value="">No conversations available</option> : null}
-        {conversations.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
+    <label className="block space-y-1 text-sm"><span>Choose a room or conversation</span>
+      <select aria-label="Choose a room or conversation" className="block h-9 w-full rounded-md border border-input bg-background px-3 text-sm" value={selected} onChange={(event) => setSelected(event.target.value)}>
+        {!conversations.length && !rooms.length ? <option value="">Nothing available</option> : null}
+        {rooms.length ? <optgroup label="Rooms — follow each new sitting">
+          {rooms.map((item) => <option key={item.id} value={`room:${item.id}`}>{item.name}</option>)}
+        </optgroup> : null}
+        {conversations.length ? <optgroup label="Conversations — one sitting only">
+          {conversations.map((item) => <option key={item.id} value={`conversation:${item.id}`}>{item.title}</option>)}
+        </optgroup> : null}
       </select>
     </label>
     <div className="flex flex-wrap gap-2">
-      <Button type="button" size="sm" disabled={pending || !selected} onClick={() => void attach()}>{pending ? "Attaching…" : "Attach conversation"}</Button>
+      <Button type="button" size="sm" disabled={pending || !selected} onClick={() => void attach()}>{pending ? "Attaching…" : selected.startsWith("room:") ? "Follow room" : "Attach conversation"}</Button>
       {attachment ? <Button type="button" size="sm" variant="outline" disabled={pending} onClick={async () => {
         setPending(true);
-        try { await rpc.call("attachments.detach", { threadId }); setAttachment(null); setConversation(null); setError(null); }
+        try { await rpc.call("attachments.detach", { threadId }); setAttachment(null); setConversation(null); setRoom(null); setError(null); }
         catch (cause) { setError(errorText(cause)); }
         finally { setPending(false); }
       }}>Detach</Button> : null}
     </div>
     <ErrorMessage error={error} />
-    {!attachment || !conversation ? <StatusBox>Attach this thread to a conversation to read its transcript.</StatusBox> : <>
+    {attachment && room && !conversation ? (
+      <StatusBox>Following {room.name}. Nobody has met in it yet — the next sitting will appear here.</StatusBox>
+    ) : !attachment || !conversation ? <StatusBox>Attach this thread to a room or conversation to read its transcript.</StatusBox> : <>
+      {room ? <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">Following {room.name}. Showing its current sitting; a new one replaces it here.</div> : null}
       <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">Reading cursor: passage {attachment.cursor}. Reading and search do not acknowledge passages automatically.</div>
       <TranscriptView
         conversationId={conversation.id} compact

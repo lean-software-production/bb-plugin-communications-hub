@@ -108,15 +108,23 @@ function handlers(
       hasMore: false,
       nextCursor: 8,
     }),
-    "attachments.get": () => ({ attachment: null, conversation: null }),
+    "attachments.get": () => ({ attachment: null, conversation: null, room: null }),
     "attachments.set": ({ threadId, conversationId }) => ({
       threadId,
+      roomId: null,
       conversationId,
+      cursor: 0,
+    }),
+    "attachments.setRoom": ({ threadId, roomId }) => ({
+      threadId,
+      roomId,
+      conversationId: null,
       cursor: 0,
     }),
     "attachments.detach": () => ({ ok: true }),
     "attachments.acknowledge": ({ threadId, conversationId, cursor }) => ({
       threadId,
+      roomId: null,
       conversationId,
       cursor,
     }),
@@ -299,8 +307,8 @@ describe("Communications Hub app", () => {
       slot.inspection.rpcCalls.some(({ method }) => method === "attachments.acknowledge"),
     ).toBe(false);
 
-    fireEvent.change(slot.getByLabelText("Choose conversation"), {
-      target: { value: "conversation-1" },
+    fireEvent.change(slot.getByLabelText("Choose a room or conversation"), {
+      target: { value: "conversation:conversation-1" },
     });
     fireEvent.click(slot.getByRole("button", { name: "Attach conversation" }));
     await slot.findByText("Ship the transcript reader.");
@@ -316,6 +324,32 @@ describe("Communications Hub app", () => {
     ).toContain("Reading and search do not acknowledge passages automatically.");
   });
 
+  it("follows a room, and says so before anyone has met in it", async () => {
+    const app = await loadPluginApp(() => import("../app"));
+    const slot = renderSlot(
+      app.threadPanelActions[0]!,
+      { threadId: "thread-a", params: null },
+      { rpc: handlers() },
+    );
+
+    await slot.findByRole("option", { name: "Team standup" });
+    fireEvent.change(slot.getByLabelText("Choose a room or conversation"), {
+      target: { value: "room:room-1" },
+    });
+    // The button names the consequence: a room target follows, a conversation target does not.
+    fireEvent.click(slot.getByRole("button", { name: "Follow room" }));
+
+    await waitFor(() =>
+      expect(slot.inspection.rpcCalls).toContainEqual({
+        method: "attachments.setRoom",
+        input: { threadId: "thread-a", roomId: "room-1" },
+      }),
+    );
+    // A room nobody has met in resolves to no conversation, which is a normal state and not
+    // an error: the thread is waiting for the first sitting.
+    await slot.findByText(/Nobody has met in it yet/);
+  });
+
   it("shows per-thread attachment state in the header and opens the panel", async () => {
     const app = await loadPluginApp(() => import("../app"));
     const slot = renderSlot(
@@ -326,10 +360,12 @@ describe("Communications Hub app", () => {
           "attachments.get": () => ({
             attachment: {
               threadId: "thread-a",
+              roomId: null,
               conversationId: conversation.id,
               cursor: 7,
             },
             conversation,
+            room: null,
           }),
         }),
         openThreadPanel: () => true,
@@ -354,8 +390,9 @@ describe("Communications Hub app", () => {
       {
         rpc: handlers({
           "attachments.get": () => ({
-            attachment: { threadId: "thread-a", conversationId: conversation.id, cursor: 0 },
+            attachment: { threadId: "thread-a", roomId: null, conversationId: conversation.id, cursor: 0 },
             conversation,
+            room: null,
           }),
           "transcripts.read": () => ({
             conversation,
