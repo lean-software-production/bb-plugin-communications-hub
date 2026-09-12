@@ -7,7 +7,7 @@ import {
   type PluginNavPanelProps, type PluginThreadHeaderActionProps, type PluginThreadPanelProps,
 } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./src/contracts";
-import type { Conversation, Room, ThreadAttachment, TranscriptSegment } from "./src/domain";
+import type { Conversation, Registrant, Room, ThreadAttachment, TranscriptSegment } from "./src/domain";
 import { groupSegments, type SpeakerBlock } from "./src/grouping";
 import type { ImportFormat } from "./src/adapters/import";
 import { Button } from "./components/ui/button";
@@ -452,6 +452,75 @@ function ConversationList({ conversations, open }: { conversations: Conversation
  * produces a real invitation, and transcript text sits in agent context, so a sentence spoken
  * in a meeting must never be able to reach this.
  */
+/** People registered for one room, and the control that issues a personal link. */
+function RoomRegistrants({ room }: { room: Room }) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [registrants, setRegistrants] = useState<Registrant[] | null>(null);
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+  const refetch = useCallback(() => {
+    rpc.call("registrants.list", { roomId: room.id }).then(
+      (value) => { setRegistrants(value.registrants); setError(null); },
+      (cause) => setError(errorText(cause)),
+    );
+  }, [rpc, room.id]);
+  useEffect(refetch, [refetch]);
+
+  const add = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!name.trim() || !email.trim() || pending) return;
+    setPending(true);
+    try {
+      await rpc.call("registrants.add", { roomId: room.id, name: name.trim(), email: email.trim() });
+      setName(""); setEmail(""); setError(null); refetch();
+    } catch (cause) { setError(errorText(cause)); }
+    finally { setPending(false); }
+  };
+
+  return (
+    <div className="mt-2 space-y-2 border-t border-border pt-2">
+      <p className="text-xs text-muted-foreground">
+        Each person gets their own link. Whoever opens it joins under the name below, signed in
+        to Zoom or not, and the plain room link asks anyone else to register first.
+      </p>
+      <form className="flex flex-wrap gap-2" onSubmit={add}>
+        <Input aria-label={`Name for ${room.name}`} placeholder="David Laing" value={name} onChange={(event) => setName(event.target.value)} className="max-w-[12rem]" />
+        <Input aria-label={`Email for ${room.name}`} placeholder="david@example.com" value={email} onChange={(event) => setEmail(event.target.value)} className="max-w-[14rem]" />
+        <Button type="submit" size="sm" variant="outline" disabled={pending || !name.trim() || !email.trim()}>{pending ? "Registering…" : "Add person"}</Button>
+      </form>
+      <ErrorMessage error={error} />
+      {registrants === null ? null : registrants.length === 0 ? (
+        <p className="text-xs text-muted-foreground">Nobody registered yet.</p>
+      ) : (
+        <ul className="space-y-1">
+          {registrants.map((person) => (
+            <li key={person.id} className="flex flex-wrap items-center justify-between gap-2 text-sm">
+              <span className="truncate">{person.name} <span className="text-xs text-muted-foreground">{person.email}</span></span>
+              <Button type="button" size="sm" variant="ghost" onClick={async () => {
+                try { await navigator.clipboard.writeText(person.joinUrl); setCopied(person.id); }
+                catch (cause) { setError(errorText(cause)); }
+              }}>{copied === person.id ? "Copied" : "Copy personal link"}</Button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** Warn before a room stops working, rather than on the morning it does. */
+function RoomExpiry({ expiresAt }: { expiresAt: number | null }) {
+  if (expiresAt === null) return null;
+  const days = Math.round((expiresAt - Date.now()) / 86_400_000);
+  if (days > 60) return null;
+  return <span className="text-xs text-amber-600">
+    {days <= 0 ? "This room has expired." : `Expires in ${days} day${days === 1 ? "" : "s"}.`}
+  </span>;
+}
+
 function Rooms() {
   const rpc = useRpc<typeof rpcContract>();
   const [rooms, setRooms] = useState<Room[] | null>(null);
@@ -501,6 +570,7 @@ function Rooms() {
               <div className="min-w-0">
                 <p className="truncate text-sm font-medium">{room.name}</p>
                 <code className="block truncate text-xs text-muted-foreground">{room.joinUrl}</code>
+                <RoomExpiry expiresAt={room.expiresAt} />
               </div>
               <div className="flex gap-2">
                 <Button type="button" size="sm" variant="outline" onClick={async () => {
@@ -512,6 +582,7 @@ function Rooms() {
                   catch (cause) { setError(errorText(cause)); }
                 }}>Archive</Button>
               </div>
+              <div className="w-full"><RoomRegistrants room={room} /></div>
             </li>
           ))}
         </ul>

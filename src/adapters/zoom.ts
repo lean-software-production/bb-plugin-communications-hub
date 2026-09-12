@@ -1,7 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import type { CaptureState, Room, TranscriptSink } from "../domain.js";
+import type { CaptureState, Registrant, Room, TranscriptSink } from "../domain.js";
 import { ZoomApi } from "./zoom-api.js";
 import {
   ZoomRtmsSession,
@@ -78,6 +78,14 @@ export interface ZoomController {
    * on the UI action and the CLI, where a human is the one asking.
    */
   createRoom(name: string): Promise<Room>;
+  /**
+   * Register a person for a room and store the personal join URL Zoom issues.
+   *
+   * Held to the same rule as room creation: UI action and CLI only, never an agent tool. This
+   * sends a real invitation to a real address, and transcript text in an agent's context must
+   * never be able to reach it.
+   */
+  addRegistrant(roomId: string, person: {name: string; email: string}): Promise<Registrant>;
 }
 
 export interface ZoomAdapterDependencies {
@@ -497,6 +505,23 @@ export function registerZoomWithDependencies(
         ),
       };
     },
+    async addRegistrant(roomId: string, person: {name: string; email: string}) {
+      const room = sink.getRoom(roomId);
+      const api = await restClient();
+      if (!api) throw new Error("Registering a person needs the Server-to-Server credential in plugin settings.");
+      const name = z.string().trim().min(1).max(200).parse(person.name);
+      const email = z.string().trim().email().max(320).parse(person.email);
+      // Zoom splits the display name into two fields and rejoins them with a space, so the
+      // remainder of the name goes in the last-name field rather than being dropped.
+      const cut = name.indexOf(" ");
+      const firstName = cut === -1 ? name : name.slice(0, cut);
+      const lastName = cut === -1 ? "-" : name.slice(cut + 1);
+      const issued = await api.addRegistrant(room.externalId, { email, firstName, lastName });
+      return sink.createRegistrant({
+        roomId: room.id, name, email,
+        externalId: issued.registrantId, joinUrl: issued.joinUrl,
+      });
+    },
     async createRoom(name: string) {
       const current = await settings.get();
       const hostUser = current.zoomHostUser?.trim();
@@ -513,6 +538,7 @@ export function registerZoomWithDependencies(
         externalId: meeting.meetingId,
         joinUrl: meeting.joinUrl,
         hostUser,
+        expiresAt: meeting.expiresAt,
       });
     },
   };

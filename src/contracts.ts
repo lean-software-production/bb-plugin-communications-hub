@@ -1,6 +1,6 @@
 import { defineRpcContract } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
-import { attachmentSchema, conversationSchema, roomSchema, segmentSchema } from './domain';
+import { attachmentSchema, conversationSchema, registrantSchema, roomSchema, segmentSchema } from './domain';
 import { importFormatSchema } from './adapters/import';
 
 export const id=z.string().trim().min(1).max(256);
@@ -22,6 +22,8 @@ export const rpcContract=defineRpcContract({
   'rooms.list':{input:z.object({includeArchived:z.boolean().optional()}).strict(),output:z.object({rooms:z.array(roomSchema)})},
   'rooms.create':{input:z.object({name:z.string().trim().min(1).max(200)}).strict(),output:roomSchema},
   'rooms.archive':{input:z.object({roomId:id}).strict(),output:roomSchema},
+  'registrants.list':{input:z.object({roomId:id}).strict(),output:z.object({registrants:z.array(registrantSchema)})},
+  'registrants.add':{input:z.object({roomId:id,name:z.string().trim().min(1).max(200),email:z.string().trim().min(3).max(320)}).strict(),output:registrantSchema},
   'capture.stop':{input:z.object({conversationId:id}).strict(),output:conversationSchema},
   'sources.status':{input:z.null(),output:z.object({zoom:z.object({configured:z.boolean(),enabled:z.boolean(),canCreateRooms:z.boolean()}),webhookPath:z.string(),importReady:z.boolean()})},
 });

@@ -355,3 +355,45 @@ describe('threads that follow a room', () => {
     expect(new Hub(db).getAttachment('thread-a')!.roomId).toBe(room.id);
   });
 });
+
+describe('registrants', () => {
+  const roomInput = () => ({
+    name:'Team standup', sourceId:'zoom', externalId:'84680215093',
+    joinUrl:'https://zoom.us/j/84680215093', hostUser:'operator@example.com',
+  });
+  const person = (roomId: string, email='david@example.com') => ({
+    roomId, name:'David Laing', email, externalId:`ext-${email}`,
+    joinUrl:`https://zoom.us/w/84680215093?tk=${email}`,
+  });
+
+  it('stores a registrant against its room', () => {
+    const {hub}=setup(); const room=hub.createRoom(roomInput());
+    const stored=hub.createRegistrant(person(room.id));
+    expect(stored).toMatchObject({roomId:room.id,name:'David Laing',email:'david@example.com'});
+    expect(hub.listRegistrants(room.id).registrants.map(r=>r.id)).toEqual([stored.id]);
+  });
+  it('refuses a second live link for the same person in one room', () => {
+    // Two live links for one person would make the participant list ambiguous about who is who.
+    const {hub}=setup(); const room=hub.createRoom(roomInput());
+    hub.createRegistrant(person(room.id));
+    expect(()=>hub.createRegistrant(person(room.id))).toThrow();
+  });
+  it('keeps registrants of different rooms apart', () => {
+    const {hub}=setup();
+    const a=hub.createRoom(roomInput());
+    const b=hub.createRoom({...roomInput(),externalId:'99900022233',name:'Vendor sync'});
+    hub.createRegistrant(person(a.id));
+    expect(hub.listRegistrants(b.id).registrants).toEqual([]);
+  });
+  it('rejects a registrant for a room that does not exist', () => {
+    const {hub}=setup();
+    expect(()=>hub.createRegistrant(person('missing'))).toThrow('Room not found');
+  });
+  it('records when a room stops working', () => {
+    const {hub}=setup();
+    const room=hub.createRoom({...roomInput(),expiresAt:1_900_000_000_000});
+    expect(room.expiresAt).toBe(1_900_000_000_000);
+    // A room created before expiry was tracked simply has none, rather than a wrong date.
+    expect(hub.createRoom({...roomInput(),externalId:'77700033344'}).expiresAt).toBeNull();
+  });
+});

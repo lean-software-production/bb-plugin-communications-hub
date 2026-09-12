@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { z } from 'zod';
-import { captureStateSchema, segmentInputSchema, type CaptureState, type Conversation, type Room, type SegmentInput, type ThreadAttachment, type TranscriptSegment } from './domain';
+import { captureStateSchema, segmentInputSchema, type CaptureState, type Conversation, type Registrant, type Room, type SegmentInput, type ThreadAttachment, type TranscriptSegment } from './domain';
 
 export const readOptionsSchema = z.object({
   after: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(30).default(20),
@@ -45,6 +45,10 @@ export const migrations = [
     CHECK (roomId IS NOT NULL OR conversationId IS NOT NULL))`,
   `INSERT OR IGNORE INTO thread_targets(threadId,conversationId,cursor)
     SELECT threadId,conversationId,cursor FROM attachments`,
+  `CREATE TABLE IF NOT EXISTS registrants (
+    id TEXT PRIMARY KEY, roomId TEXT NOT NULL REFERENCES rooms(id), name TEXT NOT NULL,
+    email TEXT NOT NULL, externalId TEXT NOT NULL, joinUrl TEXT NOT NULL, createdAt INTEGER NOT NULL,
+    UNIQUE(roomId, email))`,
 ];
 
 /** SQLite owns runtime state. No platform or BB-thread API dependencies. */
@@ -70,6 +74,7 @@ export class Hub {
       ['conversations','captureEndedAt','INTEGER'],
       ['segments','speakerId','TEXT'],
       ['conversations','roomId','TEXT'],
+      ['rooms','expiresAt','INTEGER'],
     ];
     for (const [table,column,type] of additions) {
       const columns=this.db.prepare(`PRAGMA table_info(${table})`).all() as {name:string}[];
@@ -103,15 +108,38 @@ export class Hub {
    * always has a join URL that works. Unique on (sourceId, externalId) so a retried creation
    * cannot leave two rows pointing at one Zoom meeting.
    */
-  createRoom(input: {name: string; sourceId: string; externalId: string; joinUrl: string; hostUser: string}): Room {
+  createRoom(input: {name: string; sourceId: string; externalId: string; joinUrl: string; hostUser: string; expiresAt?: number | null}): Room {
     const parsed=z.object({
       name:z.string().trim().min(1).max(200), sourceId:idSchema, externalId:idSchema,
       joinUrl:z.string().trim().min(1).max(2_048), hostUser:z.string().trim().min(1).max(320),
+      expiresAt:z.number().int().positive().nullable().optional(),
     }).strict().parse(input);
     const id=randomUUID();
-    this.db.prepare('INSERT INTO rooms(id,name,sourceId,externalId,joinUrl,hostUser,createdAt) VALUES(?,?,?,?,?,?,?)')
-      .run(id,parsed.name,parsed.sourceId,parsed.externalId,parsed.joinUrl,parsed.hostUser,Date.now());
+    this.db.prepare('INSERT INTO rooms(id,name,sourceId,externalId,joinUrl,hostUser,createdAt,expiresAt) VALUES(?,?,?,?,?,?,?,?)')
+      .run(id,parsed.name,parsed.sourceId,parsed.externalId,parsed.joinUrl,parsed.hostUser,Date.now(),parsed.expiresAt ?? null);
     this.changed(); return this.getRoom(id);
+  }
+  /**
+   * Record a person registered for a room.
+   *
+   * Unique on (room, email) so re-registering the same person cannot leave two live links for
+   * them, which would make the participant list ambiguous about who is who.
+   */
+  createRegistrant(input: {roomId: string; name: string; email: string; externalId: string; joinUrl: string}): Registrant {
+    const parsed=z.object({
+      roomId:idSchema, name:z.string().trim().min(1).max(200),
+      email:z.string().trim().min(3).max(320), externalId:idSchema,
+      joinUrl:z.string().trim().min(1).max(2_048),
+    }).strict().parse(input);
+    this.getRoom(parsed.roomId);
+    const id=randomUUID();
+    this.db.prepare('INSERT INTO registrants(id,roomId,name,email,externalId,joinUrl,createdAt) VALUES(?,?,?,?,?,?,?)')
+      .run(id,parsed.roomId,parsed.name,parsed.email,parsed.externalId,parsed.joinUrl,Date.now());
+    this.changed(); return this.db.prepare('SELECT * FROM registrants WHERE id=?').get(id) as Registrant;
+  }
+  listRegistrants(roomId: string) {
+    idSchema.parse(roomId);
+    return {registrants:this.db.prepare('SELECT * FROM registrants WHERE roomId=? ORDER BY createdAt,id').all(roomId) as Registrant[]};
   }
   getRoom(id: string): Room {
     idSchema.parse(id);
@@ -241,9 +269,15 @@ export class Hub {
       .run(threadId,roomId,current);
     this.changed(); return this.getAttachment(threadId)!;
   }
-  /** The room's most recent sitting, or null before anyone has met in it. */
+  /**
+   * The room's most recent sitting, or null before anyone has met in it.
+   *
+   * Ties on createdAt break by insertion order, not by id. Two sittings can be created in the
+   * same millisecond, and ids are random UUIDs, so ordering by id picked an arbitrary one of
+   * the two as "latest".
+   */
   private currentRoomConversation(roomId:string):string|null {
-    const row=this.db.prepare('SELECT id FROM conversations WHERE roomId=? ORDER BY createdAt DESC,id LIMIT 1').get(roomId) as {id:string}|undefined;
+    const row=this.db.prepare('SELECT id FROM conversations WHERE roomId=? ORDER BY createdAt DESC,rowid DESC LIMIT 1').get(roomId) as {id:string}|undefined;
     return row?.id ?? null;
   }
   detach(threadId:string) { idSchema.parse(threadId); this.db.prepare('DELETE FROM thread_targets WHERE threadId=?').run(threadId); this.changed(); }

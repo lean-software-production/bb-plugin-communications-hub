@@ -22,6 +22,8 @@ const usage=`bb communications commands (JSON output):
   rooms [--include-archived]
   create-room <name>
   archive-room <room-id>
+  registrants <room-id>
+  register <room-id> <name> <email>
   status
 Use the Communications panel to import files. Omitted thread-id uses the invoking BB thread.`;
 
@@ -73,6 +75,8 @@ export default async function plugin(bb:BbPluginApi) {
     'rooms.list':({includeArchived})=>hub.listRooms({includeArchived}),
     'rooms.create':({name})=>zoom.createRoom(name),
     'rooms.archive':({roomId})=>hub.archiveRoom(roomId),
+    'registrants.list':({roomId})=>hub.listRegistrants(roomId),
+    'registrants.add':({roomId,name,email})=>zoom.addRegistrant(roomId,{name,email}),
     'capture.stop':({conversationId})=>{hub.getConversation(conversationId);zoom.stop(conversationId);return hub.getConversation(conversationId);},
     'sources.status':sources,
   });
@@ -109,6 +113,8 @@ export default async function plugin(bb:BbPluginApi) {
     {name:'rooms',summary:'List reusable meeting rooms',usage:'bb communications rooms [--include-archived]'},
     {name:'create-room',summary:'Create a reusable Zoom meeting room',usage:'bb communications create-room <name>'},
     {name:'archive-room',summary:'Archive a room locally without deleting the Zoom meeting',usage:'bb communications archive-room <room-id>'},
+    {name:'registrants',summary:'List people registered for a room',usage:'bb communications registrants <room-id>'},
+    {name:'register',summary:'Register a person and issue their personal join link',usage:'bb communications register <room-id> <name> <email>'},
     {name:'status',summary:'Show source readiness',usage:'bb communications status'},
   ],async run(argv,ctx){
     const [command,...a]=argv;
@@ -130,6 +136,8 @@ export default async function plugin(bb:BbPluginApi) {
         case 'rooms':if(a.length>1||(a.length===1&&a[0]!=='--include-archived'))throw new Error(usage);result=hub.listRooms({includeArchived:a[0]==='--include-archived'});break;
         case 'create-room':if(a.length!==1)throw new Error(usage);result=await zoom.createRoom(a[0]!);break;
         case 'archive-room':if(a.length!==1)throw new Error(usage);result=hub.archiveRoom(a[0]!);break;
+        case 'registrants':if(a.length!==1)throw new Error(usage);result=hub.listRegistrants(a[0]!);break;
+        case 'register':if(a.length!==3)throw new Error(usage);result=await zoom.addRegistrant(a[0]!,{name:a[1]!,email:a[2]!});break;
         case 'status':if(a.length)throw new Error(usage);result=await sources();break;
         default:throw new Error(usage);
       }

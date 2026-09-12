@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { describe, expect, it, vi } from "vitest";
-import type { CaptureState, Room, SegmentInput, TranscriptSink } from "../src/domain.js";
+import type { CaptureState, Registrant, Room, SegmentInput, TranscriptSink } from "../src/domain.js";
 import { occurrenceTitle, registerZoomWithDependencies, type ZoomAdapterDependencies } from "../src/adapters/zoom.js";
 import type { RtmsSocket } from "../src/adapters/zoom-protocol.js";
 
@@ -12,6 +12,7 @@ class RecordingSink implements TranscriptSink {
   readonly rooms: Room[] = [];
   readonly linked: Array<{ conversationId: string; roomId: string }> = [];
   readonly renames: Array<{ conversationId: string; expected: string; title: string }> = [];
+  readonly registrants: Registrant[] = [];
 
   ensureConversation(sourceId: string, externalId: string, title: string): { id: string } {
     this.ensured.push({ sourceId, externalId, title });
@@ -30,10 +31,22 @@ class RecordingSink implements TranscriptSink {
     return this.rooms.find((room) => room.sourceId === sourceId && room.externalId === externalId) ?? null;
   }
 
-  createRoom(input: { name: string; sourceId: string; externalId: string; joinUrl: string; hostUser: string }): Room {
-    const room: Room = { id: `room-${input.externalId}`, createdAt: 0, archivedAt: null, ...input };
+  createRoom(input: { name: string; sourceId: string; externalId: string; joinUrl: string; hostUser: string; expiresAt?: number | null }): Room {
+    const room: Room = { id: `room-${input.externalId}`, createdAt: 0, archivedAt: null, expiresAt: null, ...input };
     this.rooms.push(room);
     return room;
+  }
+
+  getRoom(roomId: string): Room {
+    const room = this.rooms.find((item) => item.id === roomId);
+    if (!room) throw new Error("Room not found");
+    return room;
+  }
+
+  createRegistrant(input: { roomId: string; name: string; email: string; externalId: string; joinUrl: string }): Registrant {
+    const registrant: Registrant = { id: `registrant-${input.email}`, createdAt: 0, ...input };
+    this.registrants.push(registrant);
+    return registrant;
   }
 
   setConversationRoom(conversationId: string, roomId: string): void {
