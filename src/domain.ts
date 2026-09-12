@@ -16,8 +16,23 @@ export const conversationSchema = z.object({
   /** When capture last left an active state. With captureStartedAt this bounds the billed stream window. */
   captureEndedAt: z.number().nullable(),
   captureState: captureStateSchema, captureDetail: z.string().nullable(), interruptionCount: z.number(), segmentCount: z.number(),
+  /** The room this capture happened in, when it happened in one. Imports never belong to a room. */
+  roomId: z.string().nullable(),
 });
 export type Conversation = z.infer<typeof conversationSchema>;
+/**
+ * A reusable meeting that BB created and owns.
+ *
+ * A Zoom meeting id is stable while `meeting_uuid` changes per occupancy period, so one room
+ * accumulates many conversations. The room is the durable thing a team refers to; a
+ * conversation is one sitting in it.
+ */
+export const roomSchema = z.object({
+  id: z.string(), name: z.string(), sourceId: z.string(),
+  externalId: z.string(), joinUrl: z.string(), hostUser: z.string(),
+  createdAt: z.number(), archivedAt: z.number().nullable(),
+});
+export type Room = z.infer<typeof roomSchema>;
 export const segmentSchema = z.object({
   id: z.string(), conversationId: z.string(), sequence: z.number(), sourceKey: z.string(),
   speaker: z.string().nullable(), speakerId: z.string().nullable(), text: z.string(), startMs: z.number().nullable(), endMs: z.number().nullable(), receivedAt: z.number(),
@@ -30,4 +45,8 @@ export interface TranscriptSink {
   ensureConversation(sourceId: string, externalId: string, title: string): {id: string};
   appendSegments(conversationId: string, segments: SegmentInput[]): unknown;
   setCapture(conversationId: string, state: CaptureState, detail?: string | null): unknown;
+  /** Rooms the adapter created earlier, looked up by the identifier the source reports. */
+  findRoom(sourceId: string, externalId: string): Room | null;
+  createRoom(input: {name: string; sourceId: string; externalId: string; joinUrl: string; hostUser: string}): Room;
+  setConversationRoom(conversationId: string, roomId: string): unknown;
 }

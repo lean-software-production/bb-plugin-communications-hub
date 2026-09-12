@@ -1,7 +1,8 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import type { CaptureState, TranscriptSink } from "../domain.js";
+import type { CaptureState, Room, TranscriptSink } from "../domain.js";
+import { ZoomApi } from "./zoom-api.js";
 import {
   ZoomRtmsSession,
   assertSafeZoomWssUrl,
@@ -65,12 +66,22 @@ const interruptedPayloadSchema = z.object({
 
 export interface ZoomController {
   stop(conversationId: string): void;
-  status(): Promise<{ configured: boolean; enabled: boolean }>;
+  status(): Promise<{ configured: boolean; enabled: boolean; canCreateRooms: boolean }>;
+  /**
+   * Create a reusable Zoom meeting and record it as a room.
+   *
+   * Deliberately not exposed as an agent tool. Transcript text sits in an agent's context, so
+   * "schedule a follow-up with the vendor" spoken in a meeting is indistinguishable from an
+   * induced tool call. Creating a meeting costs money and sends a real invitation, so it stays
+   * on the UI action and the CLI, where a human is the one asking.
+   */
+  createRoom(name: string): Promise<Room>;
 }
 
 export interface ZoomAdapterDependencies {
   now(): number;
   socketFactory: RtmsSocketFactory;
+  fetch: typeof globalThis.fetch;
 }
 
 interface ActiveCapture {
@@ -87,6 +98,7 @@ interface ActiveCapture {
 const productionDependencies: ZoomAdapterDependencies = {
   now: () => Date.now(),
   socketFactory: zoomWebSocketFactory,
+  fetch: (...args) => globalThis.fetch(...args),
 };
 
 export function registerZoom(bb: BbPluginApi, sink: TranscriptSink): ZoomController {
@@ -104,6 +116,10 @@ export function registerZoomWithDependencies(
     zoomClientSecret: { type: "string", label: "Zoom client secret", secret: true },
     zoomWebhookSecret: { type: "string", label: "Zoom webhook secret", secret: true },
     zoomEnabled: { type: "boolean", label: "Enable Zoom capture", default: false },
+    zoomAccountId: { type: "string", label: "Zoom account ID (for creating rooms)" },
+    zoomApiClientId: { type: "string", label: "Zoom Server-to-Server client ID" },
+    zoomApiClientSecret: { type: "string", label: "Zoom Server-to-Server client secret", secret: true },
+    zoomHostUser: { type: "string", label: "Zoom host user (email or user ID) that installed the RTMS app" },
   });
   const activeByConversation = new Map<string, ActiveCapture>();
   const activeByStream = new Map<string, ActiveCapture>();
@@ -200,6 +216,23 @@ export function registerZoomWithDependencies(
     return proposed;
   }
 
+  /**
+   * Link a capture to the room it happened in.
+   *
+   * The Zoom meeting id is stable across occurrences while meeting_uuid is not, so this is what
+   * gathers a room's sittings together. A meeting nobody created through BB has no room, which
+   * is normal and not an error.
+   */
+  function linkRoom(conversationId: string, meetingId: string): void {
+    if (!meetingId) return;
+    try {
+      const room = sink.findRoom("zoom", meetingId);
+      if (room) sink.setConversationRoom(conversationId, room.id);
+    } catch (error) {
+      bb.log.warn(`zoom room link failed ${error instanceof Error ? error.message : "unknown"}`);
+    }
+  }
+
   async function startCapture(payload: z.infer<typeof startedPayloadSchema>, eventTs: number): Promise<void> {
     let currentSettings = await settings.get();
     if (
@@ -227,6 +260,7 @@ export function registerZoomWithDependencies(
       !currentSettings.zoomWebhookSecret?.trim()
     ) return;
     const conversation = sink.ensureConversation("zoom", payload.meeting_uuid, title);
+    linkRoom(conversation.id, meetingId);
     installCapture(createCapture({
       conversationId: conversation.id,
       meetingUuid: payload.meeting_uuid,
@@ -413,7 +447,37 @@ export function registerZoomWithDependencies(
           current.zoomWebhookSecret?.trim()
         ),
         enabled: current.zoomEnabled,
+        canCreateRooms: Boolean(
+          current.zoomAccountId?.trim() &&
+          current.zoomApiClientId?.trim() &&
+          current.zoomApiClientSecret?.trim() &&
+          current.zoomHostUser?.trim()
+        ),
       };
+    },
+    async createRoom(name: string) {
+      const current = await settings.get();
+      const accountId = current.zoomAccountId?.trim();
+      const clientId = current.zoomApiClientId?.trim();
+      const clientSecret = current.zoomApiClientSecret?.trim();
+      const hostUser = current.zoomHostUser?.trim();
+      if (!accountId || !clientId || !clientSecret || !hostUser) {
+        throw new Error("Zoom room creation needs the account ID, Server-to-Server credential and host user in plugin settings.");
+      }
+      const topic = z.string().trim().min(1).max(200).parse(name);
+      const api = new ZoomApi({ accountId, clientId, clientSecret }, {
+        fetch: dependencies.fetch,
+        now: dependencies.now,
+      });
+      const meeting = await api.createRoomMeeting(hostUser, topic);
+      // Recorded only after Zoom confirms, so a stored room always has a working join URL.
+      return sink.createRoom({
+        name: meeting.topic,
+        sourceId: "zoom",
+        externalId: meeting.meetingId,
+        joinUrl: meeting.joinUrl,
+        hostUser,
+      });
     },
   };
 }

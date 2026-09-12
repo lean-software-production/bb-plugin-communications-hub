@@ -18,6 +18,9 @@ const usage=`bb communications commands (JSON output):
   search <conversation-id> <query> [after-sequence]
   acknowledge <conversation-id> <sequence> [thread-id]
   rename <conversation-id> <title>
+  rooms [--include-archived]
+  create-room <name>
+  archive-room <room-id>
   status
 Use the Communications panel to import files. Omitted thread-id uses the invoking BB thread.`;
 
@@ -54,6 +57,9 @@ export default async function plugin(bb:BbPluginApi) {
     'attachments.set':({threadId,conversationId})=>attach(threadId,conversationId),
     'attachments.detach':({threadId})=>{hub.detach(threadId);return {ok:true};},
     'attachments.acknowledge':({threadId,conversationId,cursor})=>hub.acknowledge(threadId,conversationId,cursor),
+    'rooms.list':({includeArchived})=>hub.listRooms({includeArchived}),
+    'rooms.create':({name})=>zoom.createRoom(name),
+    'rooms.archive':({roomId})=>hub.archiveRoom(roomId),
     'capture.stop':({conversationId})=>{hub.getConversation(conversationId);zoom.stop(conversationId);return hub.getConversation(conversationId);},
     'sources.status':sources,
   });
@@ -86,6 +92,9 @@ export default async function plugin(bb:BbPluginApi) {
     {name:'search',summary:'Search a transcript',usage:'bb communications search <conversation-id> <query> [after-sequence]'},
     {name:'acknowledge',summary:'Advance a thread reading cursor',usage:'bb communications acknowledge <conversation-id> <sequence> [thread-id]'},
     {name:'rename',summary:'Rename a conversation',usage:'bb communications rename <conversation-id> <title>'},
+    {name:'rooms',summary:'List reusable meeting rooms',usage:'bb communications rooms [--include-archived]'},
+    {name:'create-room',summary:'Create a reusable Zoom meeting room',usage:'bb communications create-room <name>'},
+    {name:'archive-room',summary:'Archive a room locally without deleting the Zoom meeting',usage:'bb communications archive-room <room-id>'},
     {name:'status',summary:'Show source readiness',usage:'bb communications status'},
   ],async run(argv,ctx){
     const [command,...a]=argv;
@@ -103,6 +112,9 @@ export default async function plugin(bb:BbPluginApi) {
         case 'search':if(a.length<2||a.length>3)throw new Error(usage);result=searchPayload(hub.searchTranscript(a[0],{query:a[1],after:a[2]===undefined?0:Number(a[2])}));break;
         case 'acknowledge':if(a.length<2||a.length>3)throw new Error(usage);result=hub.acknowledge(thread(a[2]),a[0],Number(a[1]));break;
         case 'rename':if(a.length!==2)throw new Error(usage);result=hub.renameConversation(a[0]!,a[1]!);break;
+        case 'rooms':if(a.length>1||(a.length===1&&a[0]!=='--include-archived'))throw new Error(usage);result=hub.listRooms({includeArchived:a[0]==='--include-archived'});break;
+        case 'create-room':if(a.length!==1)throw new Error(usage);result=await zoom.createRoom(a[0]!);break;
+        case 'archive-room':if(a.length!==1)throw new Error(usage);result=hub.archiveRoom(a[0]!);break;
         case 'status':if(a.length)throw new Error(usage);result=await sources();break;
         default:throw new Error(usage);
       }

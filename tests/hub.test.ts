@@ -154,3 +154,66 @@ describe('renaming', () => {
     expect(hub.ensureConversation('zoom','occurrence','Zoom meeting 881').title).toBe('Attribution design');
   });
 });
+
+describe('rooms', () => {
+  const roomInput = (externalId = '88800011122') => ({
+    name:'Team standup', sourceId:'zoom', externalId,
+    joinUrl:'https://zoom.us/j/88800011122?pwd=tok', hostUser:'operator@example.com',
+  });
+  it('stores a room and finds it by the identifier the source reports', () => {
+    const {hub}=setup(); const room=hub.createRoom(roomInput());
+    expect(room.archivedAt).toBeNull();
+    // The Zoom meeting id is what an rtms_started event carries, so it is the lookup key.
+    expect(hub.findRoom('zoom','88800011122')?.id).toBe(room.id);
+    expect(hub.findRoom('zoom','other')).toBeNull();
+  });
+  it('refuses a second room for the same source meeting', () => {
+    // A retried creation must not leave two rows pointing at one Zoom meeting, or a capture
+    // would link to whichever the lookup happened to return.
+    const {hub}=setup(); hub.createRoom(roomInput());
+    expect(()=>hub.createRoom(roomInput())).toThrow();
+  });
+  it('gathers the sittings of one room together', () => {
+    const {hub}=setup(); const room=hub.createRoom(roomInput());
+    const first=hub.ensureConversation('zoom','occurrence-1','Zoom meeting 888 · first');
+    const second=hub.ensureConversation('zoom','occurrence-2','Zoom meeting 888 · second');
+    hub.setConversationRoom(first.id,room.id); hub.setConversationRoom(second.id,room.id);
+
+    expect(hub.getConversation(first.id).roomId).toBe(room.id);
+    expect(hub.getConversation(second.id).roomId).toBe(room.id);
+  });
+  it('leaves a conversation roomless when it happened outside a room', () => {
+    const {hub}=setup();
+    expect(hub.ensureConversation('import','one','Planning').roomId).toBeNull();
+  });
+  it('re-linking the same room is harmless', () => {
+    // A reconnect calls this again for a capture that is already linked.
+    const {hub}=setup(); const room=hub.createRoom(roomInput());
+    const m=hub.ensureConversation('zoom','occurrence','Zoom meeting 888');
+    hub.setConversationRoom(m.id,room.id);
+    expect(hub.setConversationRoom(m.id,room.id).roomId).toBe(room.id);
+  });
+  it('rejects linking to a room that does not exist', () => {
+    const {hub}=setup(); const m=hub.ensureConversation('zoom','occurrence','Zoom meeting 888');
+    expect(()=>hub.setConversationRoom(m.id,'missing')).toThrow('Room not found');
+  });
+  it('hides archived rooms from the default listing but keeps them readable', () => {
+    const {hub}=setup(); const room=hub.createRoom(roomInput());
+    const archived=hub.archiveRoom(room.id);
+
+    expect(archived.archivedAt).toBeGreaterThan(0);
+    expect(hub.listRooms().rooms).toEqual([]);
+    expect(hub.listRooms({includeArchived:true}).rooms.map(r=>r.id)).toEqual([room.id]);
+    // The join URL survives archiving: people may still hold it, and past sittings stay readable.
+    expect(hub.getRoom(room.id).joinUrl).toBe(roomInput().joinUrl);
+  });
+  it('keeps the first archive time when archived twice', () => {
+    const {hub}=setup(); const room=hub.createRoom(roomInput());
+    const first=hub.archiveRoom(room.id).archivedAt;
+    expect(hub.archiveRoom(room.id).archivedAt).toBe(first);
+  });
+  it('survives a hub reconstruction', () => {
+    const {db,hub}=setup(); const room=hub.createRoom(roomInput());
+    expect(new Hub(db).getRoom(room.id).name).toBe('Team standup');
+  });
+});

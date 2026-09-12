@@ -7,7 +7,7 @@ import {
   type PluginRpcTestHandlers,
 } from "@get-bb/plugin-sdk/testing/app";
 import { rpcContract } from "../src/contracts";
-import type { Conversation, TranscriptSegment } from "../src/domain";
+import type { Conversation, Room, TranscriptSegment } from "../src/domain";
 
 const conversation: Conversation = {
   id: "conversation-1",
@@ -20,6 +20,7 @@ const conversation: Conversation = {
   captureState: "idle",
   captureDetail: null,
   captureEndedAt: null,
+  roomId: null,
   interruptionCount: 0,
   segmentCount: 2,
 };
@@ -69,10 +70,24 @@ const interleavedSegments: TranscriptSegment[] = [
   },
 ];
 
+const room: Room = {
+  id: "room-1",
+  name: "Team standup",
+  sourceId: "zoom",
+  externalId: "88800011122",
+  joinUrl: "https://zoom.us/j/88800011122?pwd=token",
+  hostUser: "operator@example.com",
+  createdAt: 1_700_000_000_000,
+  archivedAt: null,
+};
+
 function handlers(
   overrides: Partial<PluginRpcTestHandlers<typeof rpcContract>> = {},
 ): PluginRpcTestHandlers<typeof rpcContract> {
   return {
+    "rooms.list": () => ({ rooms: [room] }),
+    "rooms.create": ({ name }) => ({ ...room, id: "room-2", name }),
+    "rooms.archive": () => ({ ...room, archivedAt: 1_700_000_100_000 }),
     "conversations.list": () => ({
       conversations: [conversation],
       hasMore: false,
@@ -107,7 +122,7 @@ function handlers(
     }),
     "capture.stop": () => ({ ...conversation, captureState: "stopped" }),
     "sources.status": () => ({
-      zoom: { configured: true, enabled: false },
+      zoom: { configured: true, enabled: false, canCreateRooms: false },
       webhookPath: "/plugins/communications-hub/webhooks/zoom",
       importReady: true,
     }),

@@ -7,7 +7,7 @@ import {
   type PluginNavPanelProps, type PluginThreadHeaderActionProps, type PluginThreadPanelProps,
 } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./src/contracts";
-import type { Conversation, ThreadAttachment, TranscriptSegment } from "./src/domain";
+import type { Conversation, Room, ThreadAttachment, TranscriptSegment } from "./src/domain";
 import { groupSegments, type SpeakerBlock } from "./src/grouping";
 import type { ImportFormat } from "./src/adapters/import";
 import { Button } from "./components/ui/button";
@@ -395,7 +395,7 @@ function SourceStatus() {
   const rpc = useRpc<typeof rpcContract>();
   const connection = useRealtimeConnectionState();
   const [status, setStatus] = useState<{
-    zoom: { configured: boolean; enabled: boolean }; webhookPath: string; importReady: boolean;
+    zoom: { configured: boolean; enabled: boolean; canCreateRooms: boolean }; webhookPath: string; importReady: boolean;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const refetch = useCallback(() => {
@@ -414,6 +414,7 @@ function SourceStatus() {
             <span className="rounded-full bg-secondary px-2 py-1">{status.importReady ? "Import ready" : "Import unavailable"}</span>
             <span className="rounded-full bg-secondary px-2 py-1">{status.zoom.configured ? "Zoom configured" : "Zoom not configured"}</span>
             <span className="rounded-full bg-secondary px-2 py-1">{status.zoom.enabled ? "Zoom enabled" : "Zoom disabled"}</span>
+            <span className="rounded-full bg-secondary px-2 py-1">{status.zoom.canCreateRooms ? "Room creation ready" : "Room creation unconfigured"}</span>
           </div>
           <details className="mt-3 text-sm">
             <summary className="cursor-pointer text-muted-foreground hover:text-foreground">Zoom setup details</summary>
@@ -441,6 +442,81 @@ function ConversationList({ conversations, open }: { conversations: Conversation
         </button></li>
       ))}
     </ul>
+  );
+}
+
+/**
+ * Create and list reusable meeting rooms.
+ *
+ * Deliberately a page action rather than an agent tool. Creating a meeting spends money and
+ * produces a real invitation, and transcript text sits in agent context, so a sentence spoken
+ * in a meeting must never be able to reach this.
+ */
+function Rooms() {
+  const rpc = useRpc<typeof rpcContract>();
+  const [rooms, setRooms] = useState<Room[] | null>(null);
+  const [name, setName] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+  const refetch = useCallback(() => {
+    rpc.call("rooms.list", {}).then(
+      (value) => { setRooms(value.rooms); setError(null); },
+      (cause) => setError(errorText(cause)),
+    );
+  }, [rpc]);
+  useEffect(refetch, [refetch]);
+  useChangedSignal(refetch);
+
+  const create = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const next = name.trim();
+    if (!next || pending) return;
+    setPending(true);
+    try {
+      await rpc.call("rooms.create", { name: next });
+      setName(""); setError(null); refetch();
+    } catch (cause) { setError(errorText(cause)); }
+    finally { setPending(false); }
+  };
+
+  return (
+    <section aria-labelledby="rooms-heading" className="space-y-3 rounded-lg border border-border bg-card p-4">
+      <h2 id="rooms-heading" className="font-semibold">Meeting rooms</h2>
+      <p className="text-xs text-muted-foreground">
+        A room is one reusable Zoom meeting. Its join URL never changes, and every sitting in it
+        becomes its own conversation.
+      </p>
+      <form className="flex flex-wrap gap-2" onSubmit={create}>
+        <Input aria-label="Room name" placeholder="Team standup" value={name} onChange={(event) => setName(event.target.value)} className="max-w-xs" />
+        <Button type="submit" size="sm" disabled={pending || !name.trim()}>{pending ? "Creating…" : "Create room"}</Button>
+      </form>
+      <ErrorMessage error={error} />
+      {rooms === null ? <StatusBox>Loading rooms…</StatusBox> : rooms.length === 0 ? (
+        <StatusBox>No rooms yet. Creating one schedules a Zoom meeting you can reuse.</StatusBox>
+      ) : (
+        <ul className="space-y-2">
+          {rooms.map((room) => (
+            <li key={room.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border px-3 py-2">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium">{room.name}</p>
+                <code className="block truncate text-xs text-muted-foreground">{room.joinUrl}</code>
+              </div>
+              <div className="flex gap-2">
+                <Button type="button" size="sm" variant="outline" onClick={async () => {
+                  try { await navigator.clipboard.writeText(room.joinUrl); setCopied(room.id); }
+                  catch (cause) { setError(errorText(cause)); }
+                }}>{copied === room.id ? "Copied" : "Copy join link"}</Button>
+                <Button type="button" size="sm" variant="ghost" onClick={async () => {
+                  try { await rpc.call("rooms.archive", { roomId: room.id }); setError(null); refetch(); }
+                  catch (cause) { setError(errorText(cause)); }
+                }}>Archive</Button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -484,6 +560,7 @@ function CommunicationsPage({ subPath }: PluginNavPanelProps) {
   }
   return <div className="h-full min-h-0 overflow-y-auto"><div className="mx-auto w-full max-w-3xl space-y-5 px-4 pb-6 pt-4 md:px-5">
     <SourceStatus />
+    <Rooms />
     <ImportForm onImported={(value) => { refetch(); navigate.toPluginPanel("communications", { subPath: value.id }); }} />
     <section aria-labelledby="recent-conversations" className="space-y-3">
       <h2 id="recent-conversations" className="font-semibold">Recent conversations</h2>

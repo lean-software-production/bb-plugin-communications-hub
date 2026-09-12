@@ -16,6 +16,7 @@ const conversation: Conversation = {
   captureState: "idle",
   captureDetail: null,
   captureEndedAt: null,
+  roomId: null,
   interruptionCount: 0,
   segmentCount: 0,
 };

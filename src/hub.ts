@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { z } from 'zod';
-import { captureStateSchema, segmentInputSchema, type CaptureState, type Conversation, type SegmentInput, type ThreadAttachment, type TranscriptSegment } from './domain';
+import { captureStateSchema, segmentInputSchema, type CaptureState, type Conversation, type Room, type SegmentInput, type ThreadAttachment, type TranscriptSegment } from './domain';
 
 export const readOptionsSchema = z.object({
   after: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(30).default(20),
@@ -26,6 +26,10 @@ export const migrations = [
     INSERT INTO segment_search(rowid,text) VALUES (new.rowid,new.text); END`,
   `CREATE TABLE IF NOT EXISTS attachments (
     threadId TEXT PRIMARY KEY, conversationId TEXT NOT NULL REFERENCES conversations(id), cursor INTEGER NOT NULL DEFAULT 0)`,
+  `CREATE TABLE IF NOT EXISTS rooms (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, sourceId TEXT NOT NULL, externalId TEXT NOT NULL,
+    joinUrl TEXT NOT NULL, hostUser TEXT NOT NULL, createdAt INTEGER NOT NULL, archivedAt INTEGER,
+    UNIQUE(sourceId, externalId))`,
 ];
 
 /** SQLite owns runtime state. No platform or BB-thread API dependencies. */
@@ -50,6 +54,7 @@ export class Hub {
     const additions: [string, string, string][] = [
       ['conversations','captureEndedAt','INTEGER'],
       ['segments','speakerId','TEXT'],
+      ['conversations','roomId','TEXT'],
     ];
     for (const [table,column,type] of additions) {
       const columns=this.db.prepare(`PRAGMA table_info(${table})`).all() as {name:string}[];
@@ -75,6 +80,56 @@ export class Hub {
     const next=z.string().trim().min(1).max(200).parse(title);
     this.db.prepare('UPDATE conversations SET title=? WHERE id=?').run(next,id);
     this.changed(); return this.getConversation(id);
+  }
+  /**
+   * Record a room BB created at the source.
+   *
+   * The row is written only after the source confirms the meeting, so a room in the database
+   * always has a join URL that works. Unique on (sourceId, externalId) so a retried creation
+   * cannot leave two rows pointing at one Zoom meeting.
+   */
+  createRoom(input: {name: string; sourceId: string; externalId: string; joinUrl: string; hostUser: string}): Room {
+    const parsed=z.object({
+      name:z.string().trim().min(1).max(200), sourceId:idSchema, externalId:idSchema,
+      joinUrl:z.string().trim().min(1).max(2_048), hostUser:z.string().trim().min(1).max(320),
+    }).strict().parse(input);
+    const id=randomUUID();
+    this.db.prepare('INSERT INTO rooms(id,name,sourceId,externalId,joinUrl,hostUser,createdAt) VALUES(?,?,?,?,?,?,?)')
+      .run(id,parsed.name,parsed.sourceId,parsed.externalId,parsed.joinUrl,parsed.hostUser,Date.now());
+    this.changed(); return this.getRoom(id);
+  }
+  getRoom(id: string): Room {
+    idSchema.parse(id);
+    const result=this.db.prepare('SELECT * FROM rooms WHERE id=?').get(id) as Room|undefined;
+    if (!result) throw new Error('Room not found');
+    return result;
+  }
+  /** Resolve a room from a source identifier, so a capture can be linked to the room it happened in. */
+  findRoom(sourceId: string, externalId: string): Room|null {
+    idSchema.parse(sourceId); idSchema.parse(externalId);
+    return (this.db.prepare('SELECT * FROM rooms WHERE sourceId=? AND externalId=?').get(sourceId,externalId) as Room|undefined) ?? null;
+  }
+  listRooms(options: {includeArchived?: boolean} = {}) {
+    const {includeArchived}=z.object({includeArchived:z.boolean().default(false)}).parse(options);
+    const rows=this.db.prepare(`SELECT * FROM rooms ${includeArchived?'':'WHERE archivedAt IS NULL'} ORDER BY createdAt DESC,id`).all() as Room[];
+    return {rooms:rows};
+  }
+  /**
+   * Archive a room.
+   *
+   * Local only: the Zoom meeting is left alone, because deleting it would break a join URL
+   * people may still have, and its past conversations stay readable either way.
+   */
+  archiveRoom(id: string): Room {
+    this.getRoom(id);
+    this.db.prepare('UPDATE rooms SET archivedAt=coalesce(archivedAt,?) WHERE id=?').run(Date.now(),id);
+    this.changed(); return this.getRoom(id);
+  }
+  /** Link a capture to the room it happened in. Idempotent: a reconnect re-links the same room. */
+  setConversationRoom(conversationId: string, roomId: string): Conversation {
+    this.getConversation(conversationId); this.getRoom(roomId);
+    this.db.prepare('UPDATE conversations SET roomId=? WHERE id=?').run(roomId,conversationId);
+    this.changed(); return this.getConversation(conversationId);
   }
   getConversation(id: string): Conversation {
     idSchema.parse(id);
