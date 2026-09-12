@@ -217,3 +217,26 @@ describe('rooms', () => {
     expect(new Hub(db).getRoom(room.id).name).toBe('Team standup');
   });
 });
+
+describe('late automatic naming', () => {
+  it('replaces a generated title that nobody has touched', () => {
+    const {hub}=setup(); const generated='Zoom meeting 999 · 2026-09-12 11:25Z';
+    const m=hub.ensureConversation('zoom','occurrence',generated);
+    expect(hub.renameIfUnchanged(m.id,generated,'Vendor review · 2026-09-12 11:25Z').title)
+      .toBe('Vendor review · 2026-09-12 11:25Z');
+  });
+  it('leaves a title a human chose while the lookup was in flight', () => {
+    // The source learns Zoom's topic seconds after capture starts. A human who renamed in
+    // that window must win, or automatic naming silently undoes deliberate naming.
+    const {hub}=setup(); const generated='Zoom meeting 999 · 2026-09-12 11:25Z';
+    const m=hub.ensureConversation('zoom','occurrence',generated);
+    hub.renameConversation(m.id,'Attribution design');
+
+    expect(hub.renameIfUnchanged(m.id,generated,'Vendor review').title).toBe('Attribution design');
+  });
+  it('rejects an empty automatic title rather than blanking a name', () => {
+    const {hub}=setup(); const m=hub.ensureConversation('zoom','occurrence','Zoom meeting 999');
+    expect(()=>hub.renameIfUnchanged(m.id,'Zoom meeting 999','   ')).toThrow();
+    expect(hub.getConversation(m.id).title).toBe('Zoom meeting 999');
+  });
+});

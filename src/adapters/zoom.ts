@@ -23,11 +23,13 @@ const MAX_FINISHED_CAPTURES = 64;
  * room fills, so the id alone repeats: leaving and rejoining 70 seconds apart produced two
  * conversations with identical titles and no way to tell them apart in a list.
  *
- * The timestamp is UTC and says so. Zoom's RTMS events carry no meeting topic, so this is
- * the most a capture can name itself; rename the conversation to describe the discussion.
+ * The timestamp is UTC and says so. `label` is the meeting's own name when we can find one:
+ * a room's name, or the topic read back from Zoom's API. RTMS events never carry it, so
+ * without a label the best a capture can do is identify the room it happened in.
  */
-export function occurrenceTitle(meetingId: string, anchorMs: number): string {
-  const base = meetingId ? `Zoom meeting ${meetingId}` : "Zoom meeting";
+export function occurrenceTitle(meetingId: string, anchorMs: number, label?: string | null): string {
+  const named = label?.trim();
+  const base = named ? named : meetingId ? `Zoom meeting ${meetingId}` : "Zoom meeting";
   if (!Number.isSafeInteger(anchorMs) || anchorMs < 0) return base;
   const stamp = new Date(anchorMs).toISOString().slice(0, 16).replace("T", " ");
   return `${base} · ${stamp}Z`;
@@ -217,20 +219,56 @@ export function registerZoomWithDependencies(
   }
 
   /**
-   * Link a capture to the room it happened in.
+   * Find the room a meeting belongs to.
    *
    * The Zoom meeting id is stable across occurrences while meeting_uuid is not, so this is what
    * gathers a room's sittings together. A meeting nobody created through BB has no room, which
-   * is normal and not an error.
+   * is normal and not an error, and a lookup failure must never stop a capture starting.
    */
-  function linkRoom(conversationId: string, meetingId: string): void {
+  function findRoomSafely(meetingId: string): Room | null {
+    try {
+      return sink.findRoom("zoom", meetingId);
+    } catch (error) {
+      bb.log.warn(`zoom room lookup failed ${error instanceof Error ? error.message : "unknown"}`);
+      return null;
+    }
+  }
+
+  /**
+   * Name a capture from Zoom's own meeting topic, after capture has started.
+   *
+   * Deliberately not awaited. The topic needs a REST round trip, and speech arriving while we
+   * waited for it would be speech we never recorded. A late but correct name costs nothing;
+   * a delayed socket costs transcript.
+   *
+   * The rename is conditional on the title still being the generated one, so it can never
+   * overwrite a name a human chose in the meantime.
+   */
+  async function nameFromZoom(conversationId: string, meetingId: string, generated: string, anchorMs: number): Promise<void> {
     if (!meetingId) return;
     try {
-      const room = sink.findRoom("zoom", meetingId);
-      if (room) sink.setConversationRoom(conversationId, room.id);
+      const api = await restClient();
+      if (!api) return;
+      const topic = await api.meetingTopic(meetingId);
+      if (!topic || disposed) return;
+      sink.renameIfUnchanged(conversationId, generated, occurrenceTitle(meetingId, anchorMs, topic));
     } catch (error) {
-      bb.log.warn(`zoom room link failed ${error instanceof Error ? error.message : "unknown"}`);
+      // A capture with a dull name is a far smaller loss than a capture that failed to start.
+      bb.log.warn(`zoom topic lookup failed ${error instanceof Error ? error.message : "unknown"}`);
     }
+  }
+
+  /** The REST client, or null when the Server-to-Server credential is not configured. */
+  async function restClient(): Promise<ZoomApi | null> {
+    const current = await settings.get();
+    const accountId = current.zoomAccountId?.trim();
+    const clientId = current.zoomApiClientId?.trim();
+    const clientSecret = current.zoomApiClientSecret?.trim();
+    if (!accountId || !clientId || !clientSecret) return null;
+    return new ZoomApi({ accountId, clientId, clientSecret }, {
+      fetch: dependencies.fetch,
+      now: dependencies.now,
+    });
   }
 
   async function startCapture(payload: z.infer<typeof startedPayloadSchema>, eventTs: number): Promise<void> {
@@ -250,7 +288,10 @@ export function registerZoomWithDependencies(
     const meetingId = payload.meeting_id === undefined ? "" : String(payload.meeting_id).trim();
     const proposedAnchor = Number.isSafeInteger(eventTs) ? eventTs : dependencies.now();
     const anchorMs = await captureAnchor(payload.meeting_uuid, proposedAnchor);
-    const title = occurrenceTitle(meetingId, anchorMs);
+    // A room already carries the name we gave Zoom, so the common case needs no API call and
+    // cannot delay the socket. Meetings BB did not create are named afterwards instead.
+    const room = meetingId ? findRoomSafely(meetingId) : null;
+    const title = occurrenceTitle(meetingId, anchorMs, room?.name);
     currentSettings = await settings.get();
     if (
       disposed ||
@@ -260,7 +301,8 @@ export function registerZoomWithDependencies(
       !currentSettings.zoomWebhookSecret?.trim()
     ) return;
     const conversation = sink.ensureConversation("zoom", payload.meeting_uuid, title);
-    linkRoom(conversation.id, meetingId);
+    if (room) sink.setConversationRoom(conversation.id, room.id);
+    else void nameFromZoom(conversation.id, meetingId, title, anchorMs);
     installCapture(createCapture({
       conversationId: conversation.id,
       meetingUuid: payload.meeting_uuid,
@@ -457,18 +499,12 @@ export function registerZoomWithDependencies(
     },
     async createRoom(name: string) {
       const current = await settings.get();
-      const accountId = current.zoomAccountId?.trim();
-      const clientId = current.zoomApiClientId?.trim();
-      const clientSecret = current.zoomApiClientSecret?.trim();
       const hostUser = current.zoomHostUser?.trim();
-      if (!accountId || !clientId || !clientSecret || !hostUser) {
+      const api = await restClient();
+      if (!api || !hostUser) {
         throw new Error("Zoom room creation needs the account ID, Server-to-Server credential and host user in plugin settings.");
       }
       const topic = z.string().trim().min(1).max(200).parse(name);
-      const api = new ZoomApi({ accountId, clientId, clientSecret }, {
-        fetch: dependencies.fetch,
-        now: dependencies.now,
-      });
       const meeting = await api.createRoomMeeting(hostUser, topic);
       // Recorded only after Zoom confirms, so a stored room always has a working join URL.
       return sink.createRoom({

@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CaptureState, Room, SegmentInput, TranscriptSink } from "../src/domain.js";
 import { occurrenceTitle, registerZoomWithDependencies, type ZoomAdapterDependencies } from "../src/adapters/zoom.js";
 import type { RtmsSocket } from "../src/adapters/zoom-protocol.js";
@@ -11,6 +11,7 @@ class RecordingSink implements TranscriptSink {
   readonly states: Array<{ conversationId: string; state: CaptureState; detail: string | null | undefined }> = [];
   readonly rooms: Room[] = [];
   readonly linked: Array<{ conversationId: string; roomId: string }> = [];
+  readonly renames: Array<{ conversationId: string; expected: string; title: string }> = [];
 
   ensureConversation(sourceId: string, externalId: string, title: string): { id: string } {
     this.ensured.push({ sourceId, externalId, title });
@@ -37,6 +38,10 @@ class RecordingSink implements TranscriptSink {
 
   setConversationRoom(conversationId: string, roomId: string): void {
     this.linked.push({ conversationId, roomId });
+  }
+
+  renameIfUnchanged(conversationId: string, expected: string, title: string): void {
+    this.renames.push({ conversationId, expected, title });
   }
 }
 
@@ -546,5 +551,141 @@ describe("rooms", () => {
     await expect(controller.createRoom("Team standup")).rejects.toThrow(/429/);
     // A row with a join URL nobody can use would be worse than no row at all.
     expect(sink.rooms).toEqual([]);
+  });
+});
+
+describe("naming a capture", () => {
+  const startedBody = (meetingId: string, meetingUuid = "meeting-uuid") => JSON.stringify({
+    event: "meeting.rtms_started",
+    event_ts: NOW_MS,
+    payload: {
+      meeting_uuid: meetingUuid,
+      meeting_id: meetingId,
+      operator_id: "operator-id",
+      is_original_host: true,
+      rtms_stream_id: `stream-${meetingUuid}`,
+      server_urls: "wss://rtms.zoom.us/signal",
+    },
+  });
+
+  const apiSettings = {
+    zoomClientId: "client-id",
+    zoomClientSecret: "client-secret",
+    zoomWebhookSecret: SECRET,
+    zoomEnabled: true,
+    zoomAccountId: "account-1",
+    zoomApiClientId: "api-client",
+    zoomApiClientSecret: "api-secret",
+    zoomHostUser: "operator@example.com",
+  };
+
+  function topicDependencies(topic: string | null, onCall?: () => void): ZoomAdapterDependencies {
+    return {
+      ...dependencies(),
+      fetch: ((url: string) => {
+        if (String(url).startsWith("https://zoom.us/oauth/token")) {
+          return Promise.resolve(new Response(JSON.stringify({ access_token: "t", expires_in: 3600 }), { status: 200 }));
+        }
+        onCall?.();
+        return Promise.resolve(new Response(
+          JSON.stringify({ id: 1, join_url: "https://zoom.us/j/1", ...(topic === null ? {} : { topic }) }),
+          { status: 200 },
+        ));
+      }) as unknown as typeof globalThis.fetch,
+    };
+  }
+
+  it("names a room's sitting after the room, without calling Zoom", async () => {
+    let apiCalls = 0;
+    const host = createFakePluginHost({ settings: apiSettings });
+    const sink = new RecordingSink();
+    sink.createRoom({
+      name: "Team standup", sourceId: "zoom", externalId: "84680215093",
+      joinUrl: "https://zoom.us/j/84680215093", hostUser: "operator@example.com",
+    });
+    registerZoomWithDependencies(host.bb, sink, topicDependencies("Ignored", () => { apiCalls++; }));
+
+    await host.harness.behavior.fetchHttp("POST", "/zoom/webhook", signedRequest(startedBody("84680215093")));
+
+    expect(sink.ensured[0]!.title).toBe("Team standup · 2027-01-15 08:00Z");
+    // The room already carries the name we gave Zoom, so a REST round trip would only delay
+    // the socket. Speech arriving during that wait is speech we never record.
+    expect(apiCalls).toBe(0);
+  });
+
+  it("names an unknown meeting from Zoom's topic, after capture has started", async () => {
+    const host = createFakePluginHost({ settings: apiSettings });
+    const sink = new RecordingSink();
+    registerZoomWithDependencies(host.bb, sink, topicDependencies("Vendor review"));
+
+    await host.harness.behavior.fetchHttp("POST", "/zoom/webhook", signedRequest(startedBody("99900022233")));
+    await vi.waitFor(() => expect(sink.renames).toHaveLength(1));
+
+    // The capture is created under the generated name and renamed once the topic arrives, so
+    // the lookup never sits between the webhook and the socket.
+    expect(sink.ensured[0]!.title).toBe("Zoom meeting 99900022233 · 2027-01-15 08:00Z");
+    expect(sink.renames[0]).toEqual({
+      conversationId: "conversation-meeting-uuid",
+      expected: "Zoom meeting 99900022233 · 2027-01-15 08:00Z",
+      title: "Vendor review · 2027-01-15 08:00Z",
+    });
+  });
+
+  it("renames only while the generated title is untouched", async () => {
+    // The rename is conditional on the old title, so a human who renames during the lookup wins.
+    const host = createFakePluginHost({ settings: apiSettings });
+    const sink = new RecordingSink();
+    registerZoomWithDependencies(host.bb, sink, topicDependencies("Vendor review"));
+
+    await host.harness.behavior.fetchHttp("POST", "/zoom/webhook", signedRequest(startedBody("99900022233")));
+    await vi.waitFor(() => expect(sink.renames).toHaveLength(1));
+
+    expect(sink.renames[0]!.expected).toBe(sink.ensured[0]!.title);
+  });
+
+  it("keeps the generated name when Zoom reports no topic", async () => {
+    const host = createFakePluginHost({ settings: apiSettings });
+    const sink = new RecordingSink();
+    registerZoomWithDependencies(host.bb, sink, topicDependencies(null));
+
+    await host.harness.behavior.fetchHttp("POST", "/zoom/webhook", signedRequest(startedBody("99900022233")));
+
+    expect(sink.ensured[0]!.title).toBe("Zoom meeting 99900022233 · 2027-01-15 08:00Z");
+    expect(sink.renames).toEqual([]);
+  });
+
+  it("captures normally when the topic lookup fails", async () => {
+    const host = createFakePluginHost({ settings: apiSettings });
+    const sink = new RecordingSink();
+    const deps: ZoomAdapterDependencies = {
+      ...dependencies(),
+      fetch: ((url: string) => Promise.resolve(
+        String(url).startsWith("https://zoom.us/oauth/token")
+          ? new Response(JSON.stringify({ access_token: "t", expires_in: 3600 }), { status: 200 })
+          : new Response("{}", { status: 500 }),
+      )) as unknown as typeof globalThis.fetch,
+    };
+    registerZoomWithDependencies(host.bb, sink, deps);
+
+    const response = await host.harness.behavior.fetchHttp("POST", "/zoom/webhook", signedRequest(startedBody("99900022233")));
+
+    // A dull name is a far smaller loss than a capture that failed to start.
+    expect(response.status).toBe(204);
+    expect(sink.ensured).toHaveLength(1);
+    expect(sink.renames).toEqual([]);
+  });
+
+  it("does not look up a topic without the Server-to-Server credential", async () => {
+    let apiCalls = 0;
+    const host = createFakePluginHost({
+      settings: { zoomClientId: "client-id", zoomClientSecret: "client-secret", zoomWebhookSecret: SECRET, zoomEnabled: true },
+    });
+    const sink = new RecordingSink();
+    registerZoomWithDependencies(host.bb, sink, topicDependencies("Vendor review", () => { apiCalls++; }));
+
+    await host.harness.behavior.fetchHttp("POST", "/zoom/webhook", signedRequest(startedBody("99900022233")));
+
+    expect(apiCalls).toBe(0);
+    expect(sink.ensured[0]!.title).toBe("Zoom meeting 99900022233 · 2027-01-15 08:00Z");
   });
 });

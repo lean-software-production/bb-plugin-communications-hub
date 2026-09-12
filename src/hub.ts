@@ -125,6 +125,19 @@ export class Hub {
     this.db.prepare('UPDATE rooms SET archivedAt=coalesce(archivedAt,?) WHERE id=?').run(Date.now(),id);
     this.changed(); return this.getRoom(id);
   }
+  /**
+   * Rename a conversation only if it still carries the title we expect.
+   *
+   * A source can learn a better name after a capture has started, but a human may have renamed
+   * it in the meantime. Comparing first means the late, automatic name can never overwrite the
+   * deliberate one; the compare and write are one statement, so there is no window between them.
+   */
+  renameIfUnchanged(id: string, expected: string, title: string): Conversation {
+    this.getConversation(id);
+    const next=z.string().trim().min(1).max(200).parse(title);
+    this.db.prepare('UPDATE conversations SET title=? WHERE id=? AND title=?').run(next,id,expected);
+    this.changed(); return this.getConversation(id);
+  }
   /** Link a capture to the room it happened in. Idempotent: a reconnect re-links the same room. */
   setConversationRoom(conversationId: string, roomId: string): Conversation {
     this.getConversation(conversationId); this.getRoom(roomId);
