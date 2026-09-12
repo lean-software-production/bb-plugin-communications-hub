@@ -515,7 +515,6 @@ function ThreadConversationPanel({ threadId }: PluginThreadPanelProps) {
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selected, setSelected] = useState("");
-  const [visibleCursor, setVisibleCursor] = useState(0);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refetch = useCallback(async () => {
@@ -540,7 +539,7 @@ function ThreadConversationPanel({ threadId }: PluginThreadPanelProps) {
       const next = await rpc.call("attachments.set", { threadId, conversationId: selected });
       setAttachment(next);
       setConversation(conversations.find(({ id }) => id === selected) ?? await rpc.call("conversations.get", { conversationId: selected }));
-      setVisibleCursor(0); setError(null);
+      setError(null);
     } catch (cause) { setError(errorText(cause)); }
     finally { setPending(false); }
   };
@@ -556,7 +555,7 @@ function ThreadConversationPanel({ threadId }: PluginThreadPanelProps) {
       <Button type="button" size="sm" disabled={pending || !selected} onClick={() => void attach()}>{pending ? "Attaching…" : "Attach conversation"}</Button>
       {attachment ? <Button type="button" size="sm" variant="outline" disabled={pending} onClick={async () => {
         setPending(true);
-        try { await rpc.call("attachments.detach", { threadId }); setAttachment(null); setConversation(null); setVisibleCursor(0); setError(null); }
+        try { await rpc.call("attachments.detach", { threadId }); setAttachment(null); setConversation(null); setError(null); }
         catch (cause) { setError(errorText(cause)); }
         finally { setPending(false); }
       }}>Detach</Button> : null}
@@ -566,23 +565,12 @@ function ThreadConversationPanel({ threadId }: PluginThreadPanelProps) {
       <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">Reading cursor: passage {attachment.cursor}. Reading and search do not acknowledge passages automatically.</div>
       <TranscriptView
         conversationId={conversation.id} compact
-        onPage={(page) => { setConversation(page.conversation); setVisibleCursor(page.nextCursor); }}
+        onPage={(page) => setConversation(page.conversation)}
         onSend={(block) => {
           const quote = quoteBlock(block, conversation.title);
           composer.updateText((current) => current.trim().length === 0 ? quote : `${current.trimEnd()}\n\n${quote}`);
         }}
       />
-      {visibleCursor > attachment.cursor ? <Button
-        type="button" size="sm" variant="outline" aria-label={`Acknowledge through passage ${visibleCursor}`}
-        onClick={async () => {
-          try {
-            setAttachment(await rpc.call("attachments.acknowledge", {
-              threadId, conversationId: conversation.id, cursor: visibleCursor,
-            }));
-            setError(null);
-          } catch (cause) { setError(errorText(cause)); }
-        }}
-      >Acknowledge through passage {visibleCursor}</Button> : null}
     </>}
   </div></div>;
 }

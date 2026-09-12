@@ -271,7 +271,7 @@ describe("Communications Hub app", () => {
     );
   });
 
-  it("attaches a conversation and acknowledges only on explicit action", async () => {
+  it("attaches a conversation without acknowledging and offers no acknowledge control", async () => {
     const app = await loadPluginApp(() => import("../app"));
     const slot = renderSlot(
       app.threadPanelActions[0]!,
@@ -293,13 +293,12 @@ describe("Communications Hub app", () => {
       slot.inspection.rpcCalls.some(({ method }) => method === "attachments.acknowledge"),
     ).toBe(false);
 
-    fireEvent.click(slot.getByRole("button", { name: "Acknowledge through passage 8" }));
-    await waitFor(() =>
-      expect(slot.inspection.rpcCalls).toContainEqual({
-        method: "attachments.acknowledge",
-        input: { threadId: "thread-a", conversationId: "conversation-1", cursor: 8 },
-      }),
-    );
+    expect(
+      slot.queryByRole("button", { name: /Acknowledge through passage/ }),
+    ).toBeNull();
+    expect(
+      (await slot.findByText(/Reading cursor: passage/)).textContent,
+    ).toContain("Reading and search do not acknowledge passages automatically.");
   });
 
   it("shows per-thread attachment state in the header and opens the panel", async () => {
