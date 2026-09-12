@@ -109,3 +109,27 @@ This makes an owner-scheduled, join-before-host meeting a viable persistent room
 **Credit usage is reported under Plans and Billing > Plan Management**, on the Developer Pack card, metered separately for RTMS with and without transcription. It updates only every 24 hours, so same-day usage reads as zero.
 
 **One credit buys about 50 streaming minutes with transcription.** The day after the meetings above, Plan Management read 1 of 20 credits for 50 streaming minutes, against a predicted 40-57 minutes. Zoom's figure exceeded the 28.62 minutes derivable from `lastReceivedAt`, which is consistent with Zoom billing the whole socket lifetime, trailing silence and failed captures included. Estimate stream cost from `captureStartedAt` and `captureEndedAt`, never from segment times.
+
+## Validated behaviour (2026-09-12)
+
+Measured against live Zoom with a Server-to-Server OAuth credential.
+
+**BB-created meetings auto-start RTMS.** A meeting created through the API inherits auto-start from the host user's Zoom Apps setting, so the host must be the account that installed the RTMS app. Verified for both a recurring meeting with no fixed time (type 3) and a recurring meeting with a fixed time (type 8).
+
+**A room's sittings can be gathered.** The Zoom meeting id is stable across occurrences while `meeting_uuid` is not, so the id is what links each sitting to its room. Two sittings of one room both carried its room id.
+
+**`user_id` identifies a connection, not a person.** Every capture with a single participant reported `16778240`, which is `0x1000000` - a per-session counter starting from the same base in every meeting. Two different people in two different meetings shared it. Within one occurrence the ids do differ: one person joining from two browsers produced `16778240` and `16791552`. So the field separates simultaneous speakers and nothing more. A `user_id` to identity mapping would confidently misattribute.
+
+**Registration is refused on recurring meetings with no fixed time, silently.** `approval_type: 0` is accepted at creation and stored as `2`; a `PATCH` returns 204 and changes nothing; adding a registrant then fails with "Registration has not been enabled for this meeting". An otherwise identical scheduled meeting (type 2) stored `approval_type: 0` and accepted a registrant, so it is the meeting type and not the request.
+
+**A recurring meeting with a fixed time (type 8) accepts registration.** It keeps one meeting id and one join URL like type 3, and with `registration_type: 2` one registrant link is valid for every occurrence. `join_before_host` survives alongside registration, unlike a waiting room.
+
+**A registrant link sets the display name**, signed in or not. Both a signed-in browser and an incognito one reported the registered name without the participant typing anything.
+
+**The plain join URL does not bypass registration**: it lands on Zoom's registration form. Every route into the meeting therefore produces a named participant. Registration is a gate rather than proof - a stranger with the plain link can register under any name - but a BB-issued link carries a name BB chose.
+
+**Scheduled occurrence times are nominal.** A type 8 meeting whose first occurrence was eight days away accepted a join immediately and captured normally.
+
+**A type 8 room expires.** The recurrence needs an end: at most 60 occurrences or a fixed end date. Nothing renews it, so the room stops working on a date nobody is watching.
+
+**Reading a meeting topic needs its own scope.** Naming a capture from Zoom's topic uses `GET /meetings/{id}` and fails with 400 until `meeting:read:meeting:admin` is granted. Registrants need `meeting:write:registrant:admin`, and changing a meeting after creation needs `meeting:update:meeting:admin`.
